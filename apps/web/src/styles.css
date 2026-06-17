@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: 'Manrope', sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(242, 174, 60, 0.14), transparent 30%),
+    radial-gradient(circle at top right, rgba(95, 119, 255, 0.16), transparent 26%),
+    linear-gradient(180deg, #07111f 0%, #0c1b33 48%, #07111f 100%);
+}
+
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: #e6edf7;
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: rgba(242, 174, 60, 0.28);
+}
+
+@layer components {
+  .glass-card {
+    @apply border border-white/10 bg-white/5 backdrop-blur-xl shadow-glow;
+  }
+
+  .section-title {
+    @apply font-display text-2xl font-bold tracking-tight text-white;
+  }
+
+  .label-chip {
+    @apply inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-mist-200;
+  }
+}
