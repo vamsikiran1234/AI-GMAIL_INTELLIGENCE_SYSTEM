@@ -4,6 +4,7 @@ com\repeatless\gmailintelligence\service\TokenCryptoService.class
 com\repeatless\gmailintelligence\service\GmailApiClient.class
 com\repeatless\gmailintelligence\service\GmailApiClient$ThreadPage.class
 com\repeatless\gmailintelligence\repository\EmailIntelligenceRepository.class
+com\repeatless\gmailintelligence\controller\InternalSyncController$InternalSyncRequest.class
 com\repeatless\gmailintelligence\dto\ApiDtos$NewsletterItemResponse.class
 com\repeatless\gmailintelligence\service\EmailIntelligenceService.class
 com\repeatless\gmailintelligence\controller\SyncController.class
@@ -20,6 +21,7 @@ com\repeatless\gmailintelligence\dto\ApiDtos$EmailSummaryResponse.class
 com\repeatless\gmailintelligence\repository\EmailIntelligenceRepository$ThreadTranscript.class
 com\repeatless\gmailintelligence\service\EmailIntelligenceService$NewsletterCluster.class
 com\repeatless\gmailintelligence\repository\ConversationRepository$ChatHistoryItem.class
+com\repeatless\gmailintelligence\controller\InternalSyncController.class
 com\repeatless\gmailintelligence\dto\ApiDtos.class
 com\repeatless\gmailintelligence\service\GmailDataStore$ThreadDigestRow.class
 com\repeatless\gmailintelligence\dto\ApiDtos$SourceCitation.class

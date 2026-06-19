@@ -21,6 +21,7 @@ spring:
 
 app:
   frontend-origin: ${FRONTEND_ORIGIN:http://localhost:5173}
+  internal-secret: ${N8N_INTERNAL_SECRET:}
   gmail:
     client-id: ${GMAIL_OAUTH_CLIENT_ID:}
     client-secret: ${GMAIL_OAUTH_CLIENT_SECRET:}

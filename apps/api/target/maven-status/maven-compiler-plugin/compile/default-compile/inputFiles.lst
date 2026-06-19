@@ -3,6 +3,7 @@ D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\c
 D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\config\WebClientConfig.java
 D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\controller\AssistantController.java
 D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\controller\HealthController.java
+D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\controller\InternalSyncController.java
 D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\controller\OAuthController.java
 D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\controller\SyncController.java
 D:\AI_GMAIL_INTELL_SYS\apps\api\src\main\java\com\repeatless\gmailintelligence\controller\ThreadController.java

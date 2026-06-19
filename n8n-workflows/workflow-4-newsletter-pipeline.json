@@ -1,0 +1,175 @@
+{
+  "name": "Workflow 4 - Newsletter Deduplication Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-newsletter",
+      "name": "Daily at 6 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT user_id FROM email_thread WHERE category = 'NEWSLETTERS' AND last_message_at > now() - interval '2 days'",
+        "options": {}
+      },
+      "id": "postgres-newsletter-users",
+      "name": "Find Users With Newsletters",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-users",
+      "name": "Process One User At A Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.API_BASE_URL }}/assistant/newsletter-digest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "ngrok-skip-browser-warning",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"userId\": \"{{ $json.user_id }}\",\n  \"days\": 2\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-newsletter-digest",
+      "name": "Build Newsletter Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "has-items",
+              "leftValue": "={{ $json.items.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        }
+      },
+      "id": "check-has-items",
+      "name": "Has Newsletter Items?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract newsletter items from the digest response\nconst userId = $('Process One User At A Time').item.json.user_id;\nconst items = $input.item.json.items || [];\nconst today = new Date().toISOString().split('T')[0];\n\nreturn items.map(item => ({\n  json: {\n    userId,\n    canonicalTitle: item.title || 'Untitled',\n    canonicalUrl: item.canonicalUrl || null,\n    summary: item.summary || '',\n    sourceNames: item.source ? item.source.split(', ') : [],\n    digestDate: today\n  }\n}));"
+      },
+      "id": "prepare-items",
+      "name": "Prepare Items For DB",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO newsletter_item (id, user_id, canonical_title, canonical_url, source_names, summary, digest_date, created_at, updated_at)\nVALUES (\n  gen_random_uuid()::text,\n  '{{ $json.userId }}',\n  '{{ $json.canonicalTitle.replace(/'/g, \"''\") }}',\n  {{ $json.canonicalUrl ? `'${$json.canonicalUrl}'` : 'NULL' }},\n  ARRAY[{{ $json.sourceNames.map(s => `'${s.replace(/'/g, \"''\")}'`).join(',') }}]::text[],\n  '{{ $json.summary.replace(/'/g, \"''\") }}',\n  '{{ $json.digestDate }}'::date,\n  now(),\n  now()\n)\nON CONFLICT DO NOTHING",
+        "options": {}
+      },
+      "id": "postgres-insert-items",
+      "name": "Save Newsletter Items",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1560, 220],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const userId = $('Process One User At A Time').item.json.user_id;\nconsole.log(`No newsletter items found for user ${userId} in last 2 days`);\nreturn $input.all();"
+      },
+      "id": "log-no-items",
+      "name": "Log No Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 400]
+    }
+  ],
+  "connections": {
+    "Daily at 6 AM": {
+      "main": [
+        [{ "node": "Find Users With Newsletters", "type": "main", "index": 0 }]
+      ]
+    },
+    "Find Users With Newsletters": {
+      "main": [
+        [{ "node": "Process One User At A Time", "type": "main", "index": 0 }]
+      ]
+    },
+    "Process One User At A Time": {
+      "main": [
+        [{ "node": "Build Newsletter Digest", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Newsletter Digest": {
+      "main": [
+        [{ "node": "Has Newsletter Items?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Newsletter Items?": {
+      "main": [
+        [{ "node": "Prepare Items For DB", "type": "main", "index": 0 }],
+        [{ "node": "Log No Items", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Items For DB": {
+      "main": [
+        [{ "node": "Save Newsletter Items", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

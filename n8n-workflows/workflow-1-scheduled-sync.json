@@ -1,0 +1,164 @@
+{
+  "name": "Workflow 1 - Scheduled Gmail Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT user_id FROM gmail_connection WHERE last_synced_at < now() - interval '25 minutes' OR last_synced_at IS NULL",
+        "options": {}
+      },
+      "id": "postgres-get-users",
+      "name": "Get Users Due For Sync",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-batches",
+      "name": "Process One User At A Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.API_BASE_URL }}/internal/sync-user",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "ngrok-skip-browser-warning",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"userId\": \"{{ $json.user_id }}\",\n  \"secret\": \"{{ $vars.N8N_INTERNAL_SECRET }}\"\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-sync-user",
+      "name": "Trigger Sync For User",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "status-check",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "check-sync-status",
+      "name": "Sync Completed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE gmail_connection SET last_synced_at = now() WHERE user_id = '{{ $('Process One User At A Time').item.json.user_id }}'",
+        "options": {}
+      },
+      "id": "postgres-update-synced",
+      "name": "Mark Sync Successful",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1340, 220],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const userId = $('Process One User At A Time').item.json.user_id;\nconst error = $input.item.json;\nconsole.error(`Sync failed for user ${userId}:`, JSON.stringify(error));\nreturn [{ json: { userId, error: JSON.stringify(error), timestamp: new Date().toISOString() } }];"
+      },
+      "id": "log-sync-error",
+      "name": "Log Sync Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 400]
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": {
+      "main": [
+        [{ "node": "Get Users Due For Sync", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Users Due For Sync": {
+      "main": [
+        [{ "node": "Process One User At A Time", "type": "main", "index": 0 }]
+      ]
+    },
+    "Process One User At A Time": {
+      "main": [
+        [{ "node": "Trigger Sync For User", "type": "main", "index": 0 }],
+        [{ "node": "Mark Sync Successful", "type": "main", "index": 0 }]
+      ]
+    },
+    "Trigger Sync For User": {
+      "main": [
+        [{ "node": "Sync Completed?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Sync Completed?": {
+      "main": [
+        [{ "node": "Mark Sync Successful", "type": "main", "index": 0 }],
+        [{ "node": "Log Sync Error", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
