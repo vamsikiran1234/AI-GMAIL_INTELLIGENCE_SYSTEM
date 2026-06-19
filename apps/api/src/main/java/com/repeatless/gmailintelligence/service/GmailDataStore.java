@@ -27,6 +27,16 @@ public class GmailDataStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    public void ensureUser(String userId, String emailAddress, String displayName) {
+        jdbcTemplate.update("""
+                insert into app_user (id, email_address, display_name, created_at, updated_at)
+                values (:userId, :emailAddress, :displayName, now(), now())
+                on conflict (id) do update set
+                    email_address = excluded.email_address,
+                    updated_at = now()
+                """, Map.of("userId", userId, "emailAddress", emailAddress, "displayName", displayName == null ? "" : displayName));
+    }
+
     public void saveConnection(String userId, String emailAddress, String encryptedRefreshToken, String accessToken,
             Instant accessTokenExpiresAt, String lastHistoryId) {
         Map<String, Object> params = new LinkedHashMap<>();
@@ -93,11 +103,10 @@ public class GmailDataStore {
         return results.stream().findFirst();
     }
 
-    public void saveThread(String userId, GmailThreadSnapshot thread, String subject, String labelIdsJson,
-            String category, String summary) {
+    public void saveThread(String userId, GmailThreadSnapshot thread, String category, String summary) {
         jdbcTemplate.update("""
-                insert into email_thread (user_id, thread_id, history_id, subject, label_ids_json, category, summary, message_count, latest_message_at, updated_at, created_at)
-                values (:userId, :threadId, :historyId, :subject, :labelIdsJson, :category, :summary, :messageCount, :latestMessageAt, now(), now())
+                insert into email_thread (user_id, thread_id, history_id, subject, label_ids_json, category, summary, message_count, last_message_at, updated_at, created_at)
+                values (:userId, :threadId, :historyId, :subject, :labelIdsJson, :category, :summary, :messageCount, :lastMessageAt, now(), now())
                 on conflict (user_id, thread_id) do update set
                     history_id = excluded.history_id,
                     subject = excluded.subject,
@@ -105,22 +114,40 @@ public class GmailDataStore {
                     category = excluded.category,
                     summary = excluded.summary,
                     message_count = excluded.message_count,
-                    latest_message_at = excluded.latest_message_at,
+                    last_message_at = excluded.last_message_at,
                     updated_at = now()
                 """, Map.of(
                 "userId", userId,
                 "threadId", thread.threadId(),
                 "historyId", thread.historyId(),
-                "subject", subject,
-                "labelIdsJson", labelIdsJson,
+                "subject", thread.subject() == null ? "" : thread.subject(),
+                "labelIdsJson", thread.labelIds() == null ? "[]" : thread.labelIds(),
                 "category", category,
                 "summary", summary,
                 "messageCount", thread.messages().size(),
-                "latestMessageAt", thread.updatedAt()));
+                "lastMessageAt", thread.updatedAt()));
     }
 
     public void saveMessage(String userId, GmailMessageSnapshot message, String snippet, String summary,
             String category) {
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("userId", userId);
+        params.put("threadId", message.threadId());
+        params.put("messageId", message.messageId());
+        params.put("messageIdHeader", message.messageIdHeader());
+        params.put("inReplyTo", message.inReplyTo());
+        params.put("referencesHeader", message.references());
+        params.put("fromAddress", message.fromAddress());
+        params.put("toAddressesJson", message.toAddresses());
+        params.put("ccAddressesJson", message.ccAddresses());
+        params.put("subject", message.subject());
+        params.put("sentAt", message.sentAt());
+        params.put("bodyText", message.bodyText());
+        params.put("bodyHtml", message.bodyHtml());
+        params.put("snippet", snippet);
+        params.put("summary", summary);
+        params.put("category", category);
+        params.put("rawInternalDate", message.internalDateEpochMillis());
         jdbcTemplate.update("""
                 insert into email_message (user_id, thread_id, message_id, message_id_header, in_reply_to, references_header, from_address, to_addresses_json, cc_addresses_json, subject, sent_at, body_text, body_html, snippet, summary, category, raw_internal_date, created_at, updated_at)
                 values (:userId, :threadId, :messageId, :messageIdHeader, :inReplyTo, :referencesHeader, :fromAddress, :toAddressesJson, :ccAddressesJson, :subject, :sentAt, :bodyText, :bodyHtml, :snippet, :summary, :category, :rawInternalDate, now(), now())
@@ -141,24 +168,7 @@ public class GmailDataStore {
                     category = excluded.category,
                     raw_internal_date = excluded.raw_internal_date,
                     updated_at = now()
-                """, Map.of(
-                "userId", userId,
-                "threadId", message.threadId(),
-                "messageId", message.messageId(),
-                "messageIdHeader", message.messageIdHeader(),
-                "inReplyTo", message.inReplyTo(),
-                "referencesHeader", message.references(),
-                "fromAddress", message.fromAddress(),
-                "toAddressesJson", message.toAddresses(),
-                "ccAddressesJson", message.ccAddresses(),
-                "subject", message.subject(),
-                "sentAt", message.sentAt(),
-                "bodyText", message.bodyText(),
-                "bodyHtml", message.bodyHtml(),
-                "snippet", snippet,
-                "summary", summary,
-                "category", category,
-                "rawInternalDate", message.internalDateEpochMillis()));
+                """, params);
     }
 
     public void saveEmbedding(String userId, String sourceType, String sourceId, String threadId, String content,
@@ -207,23 +217,23 @@ public class GmailDataStore {
 
     public List<ThreadDigestRow> listRecentThreads(String userId, int limit) {
         return jdbcTemplate.query("""
-                select thread_id, subject, category, summary, latest_message_at
+                select thread_id, subject, category, summary, last_message_at
                 from email_thread
                 where user_id = :userId
-                order by latest_message_at desc nulls last
+                order by last_message_at desc nulls last
                 limit :limit
                 """, Map.of("userId", userId, "limit", limit), (resultSet, rowNum) -> new ThreadDigestRow(
                 resultSet.getString("thread_id"),
                 resultSet.getString("subject"),
                 resultSet.getString("category"),
                 resultSet.getString("summary"),
-                resultSet.getTimestamp("latest_message_at") == null ? null : resultSet.getTimestamp("latest_message_at").toInstant()));
+                resultSet.getTimestamp("last_message_at") == null ? null : resultSet.getTimestamp("last_message_at").toInstant()));
     }
 
     public List<GmailMessageSnapshot> loadThreadMessages(String threadId) {
         return jdbcTemplate.query("""
                   select message_id, thread_id, message_id_header, in_reply_to, references_header, from_address,
-                      to_addresses, cc_addresses, subject, sent_at, body_text, body_html, raw_internal_date
+                      to_addresses_json, cc_addresses_json, subject, sent_at, body_text, body_html, raw_internal_date
                 from email_message
                 where thread_id = :threadId
                 order by sent_at asc nulls last, raw_internal_date asc
@@ -234,8 +244,8 @@ public class GmailDataStore {
                 resultSet.getString("in_reply_to"),
                 resultSet.getString("references_header"),
                 resultSet.getString("from_address"),
-                resultSet.getString("to_addresses"),
-                resultSet.getString("cc_addresses"),
+                resultSet.getString("to_addresses_json"),
+                resultSet.getString("cc_addresses_json"),
                 resultSet.getString("subject"),
                 resultSet.getTimestamp("sent_at") == null ? null : resultSet.getTimestamp("sent_at").toInstant(),
                 resultSet.getString("body_text"),
@@ -246,7 +256,7 @@ public class GmailDataStore {
     public Optional<GmailMessageSnapshot> findMessageById(String userId, String messageId) {
         List<GmailMessageSnapshot> results = jdbcTemplate.query("""
                   select message_id, thread_id, message_id_header, in_reply_to, references_header, from_address,
-                      to_addresses, cc_addresses, subject, sent_at, body_text, body_html, raw_internal_date
+                      to_addresses_json, cc_addresses_json, subject, sent_at, body_text, body_html, raw_internal_date
                 from email_message
                 where user_id = :userId and message_id = :messageId
                 """, Map.of("userId", userId, "messageId", messageId), (resultSet, rowNum) -> new GmailMessageSnapshot(
@@ -256,8 +266,8 @@ public class GmailDataStore {
                 resultSet.getString("in_reply_to"),
                 resultSet.getString("references_header"),
                 resultSet.getString("from_address"),
-                resultSet.getString("to_addresses"),
-                resultSet.getString("cc_addresses"),
+                resultSet.getString("to_addresses_json"),
+                resultSet.getString("cc_addresses_json"),
                 resultSet.getString("subject"),
                 resultSet.getTimestamp("sent_at") == null ? null : resultSet.getTimestamp("sent_at").toInstant(),
                 resultSet.getString("body_text"),

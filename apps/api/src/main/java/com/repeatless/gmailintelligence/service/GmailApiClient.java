@@ -137,14 +137,14 @@ public class GmailApiClient {
 
         List<String> threadIds = new ArrayList<>();
         JsonNode histories = response.path("history");
-        return new HistoryPage(threadIds.stream().distinct().toList(), response.path("nextPageToken").asText(""), response.path("historyId").asText(historyId));
+        if (histories.isArray()) {
             for (JsonNode history : histories) {
                 collectThreadIds(history.path("messagesAdded"), threadIds);
                 collectThreadIds(history.path("labelsAdded"), threadIds);
                 collectThreadIds(history.path("messagesDeleted"), threadIds);
             }
         }
-        return threadIds.stream().distinct().toList();
+        return new HistoryPage(threadIds.stream().distinct().toList(), response.path("nextPageToken").asText(""), response.path("historyId").asText(historyId));
     }
 
     public String sendMessage(String accessToken, String rawMimeMessageBase64Url) {

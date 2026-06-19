@@ -32,7 +32,7 @@ create table if not exists sync_cursor (
 );
 
 create table if not exists email_thread (
-    id text primary key,
+    id uuid primary key default gen_random_uuid(),
     user_id text not null references app_user(id) on delete cascade,
     thread_id text not null,
     subject text,
@@ -51,7 +51,7 @@ create index if not exists idx_email_thread_user_last_message on email_thread(us
 create index if not exists idx_email_thread_category on email_thread(user_id, category);
 
 create table if not exists email_message (
-    id text primary key,
+    id uuid primary key default gen_random_uuid(),
     user_id text not null references app_user(id) on delete cascade,
     message_id text not null,
     thread_id text not null,
@@ -66,8 +66,8 @@ create table if not exists email_message (
     body_text text,
     body_html text,
     snippet text,
-    category text,
     summary text,
+    category text,
     raw_internal_date bigint,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
@@ -78,7 +78,7 @@ create index if not exists idx_email_message_thread_sent_at on email_message(use
 create index if not exists idx_email_message_sender on email_message(user_id, from_address);
 
 create table if not exists email_embedding (
-    id text primary key,
+    id uuid primary key default gen_random_uuid(),
     user_id text not null references app_user(id) on delete cascade,
     source_type text not null,
     source_id text not null,

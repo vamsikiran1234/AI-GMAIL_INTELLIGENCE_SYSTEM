@@ -17,44 +17,43 @@ public class RetrievalRepository {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    public void upsertEmbedding(String userId, String sourceType, String sourceId, String threadId, String embeddingText, String embeddingVector) {
+    public void upsertEmbedding(String userId, String sourceType, String sourceId, String threadId,
+            String content, String embeddingVector, String sender, Instant sentAt) {
         jdbcTemplate.update(
                 """
                         insert into email_embedding(
-                            id, user_id, source_type, source_id, gmail_thread_id, embedding_text, embedding, created_at, updated_at
-                        ) values (?, ?, ?, ?, ?, ?, cast(? as vector), now(), now())
+                            user_id, source_type, source_id, thread_id, content, embedding,
+                            sender, sent_at, created_at, updated_at
+                        ) values (?, ?, ?, ?, ?, cast(? as vector), ?, ?, now(), now())
                         on conflict (user_id, source_type, source_id) do update set
-                            gmail_thread_id = excluded.gmail_thread_id,
-                            embedding_text = excluded.embedding_text,
+                            thread_id = excluded.thread_id,
+                            content = excluded.content,
                             embedding = excluded.embedding,
+                            sender = excluded.sender,
+                            sent_at = excluded.sent_at,
                             updated_at = now()
                         """,
-                sourceId, userId, sourceType, sourceId, threadId, embeddingText, embeddingVector
+                userId, sourceType, sourceId, threadId, content, embeddingVector, sender, sentAt
         );
     }
 
     public List<RetrievalHit> findSimilar(String userId, String embeddingVector, int limit) {
         return jdbcTemplate.query(
                 """
-                        select source_type, source_id, gmail_thread_id, sender, sent_at, snippet, score
-                        from (
-                            select source_type,
-                                   source_id,
-                                   gmail_thread_id,
-                                   coalesce(sender, '') as sender,
-                                   created_at as sent_at,
-                                   embedding_text as snippet,
-                                   1 - (embedding <=> cast(? as vector)) as score
-                            from email_embedding
-                            where user_id = ?
-                            order by embedding <=> cast(? as vector)
-                            limit ?
-                        ) ranked
+                        select source_type, source_id, thread_id,
+                               coalesce(sender, '') as sender,
+                               sent_at,
+                               content as snippet,
+                               1 - (embedding <=> cast(? as vector)) as score
+                        from email_embedding
+                        where user_id = ?
+                        order by embedding <=> cast(? as vector)
+                        limit ?
                         """,
                 (resultSet, rowNum) -> new RetrievalHit(
                         resultSet.getString("source_type"),
                         resultSet.getString("source_id"),
-                        resultSet.getString("gmail_thread_id"),
+                        resultSet.getString("thread_id"),
                         resultSet.getString("sender"),
                         resultSet.getObject("sent_at", Instant.class),
                         resultSet.getString("snippet"),

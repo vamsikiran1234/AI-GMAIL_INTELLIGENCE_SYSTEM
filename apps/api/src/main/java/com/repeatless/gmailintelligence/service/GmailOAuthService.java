@@ -29,6 +29,8 @@ public class GmailOAuthService {
         String accessToken = tokenResponse.access_token();
         String refreshToken = tokenResponse.refresh_token();
         String emailAddress = gmailApiClient.getUserProfileEmail(accessToken);
+        // Ensure the app_user row exists before inserting gmail_connection (FK requirement)
+        gmailDataStore.ensureUser(stateUserId, emailAddress, stateUserId);
         String encryptedRefreshToken = tokenCryptoService.encrypt(refreshToken);
         gmailDataStore.saveConnection(
                 stateUserId,

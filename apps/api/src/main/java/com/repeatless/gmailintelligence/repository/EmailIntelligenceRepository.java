@@ -3,7 +3,6 @@ package com.repeatless.gmailintelligence.repository;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -27,20 +26,22 @@ public class EmailIntelligenceRepository {
         jdbcTemplate.update(
                 """
                         insert into email_thread(
-                            id, user_id, gmail_thread_id, subject, last_message_at, history_id,
-                            label_ids, category, summary, created_at, updated_at
+                            user_id, thread_id, subject, last_message_at, history_id,
+                            label_ids_json, category, summary, message_count, created_at, updated_at
                         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
-                        on conflict (user_id, gmail_thread_id) do update set
+                        on conflict (user_id, thread_id) do update set
                             subject = excluded.subject,
                             last_message_at = excluded.last_message_at,
                             history_id = excluded.history_id,
-                            label_ids = excluded.label_ids,
+                            label_ids_json = excluded.label_ids_json,
                             category = excluded.category,
                             summary = excluded.summary,
+                            message_count = excluded.message_count,
                             updated_at = now()
                         """,
-                threadSnapshot.threadId(), userId, threadSnapshot.threadId(), threadSnapshot.subject(),
-                threadSnapshot.updatedAt(), threadSnapshot.historyId(), threadSnapshot.labelIds(), category, summary
+                userId, threadSnapshot.threadId(), threadSnapshot.subject(),
+                threadSnapshot.updatedAt(), threadSnapshot.historyId(), threadSnapshot.labelIds(),
+                category, summary, threadSnapshot.messages().size()
         );
     }
 
@@ -48,18 +49,18 @@ public class EmailIntelligenceRepository {
         jdbcTemplate.update(
                 """
                         insert into email_message(
-                            id, user_id, gmail_message_id, gmail_thread_id, message_id_header, in_reply_to,
-                            references_header, from_address, to_addresses, cc_addresses, subject,
+                            user_id, message_id, thread_id, message_id_header, in_reply_to,
+                            references_header, from_address, to_addresses_json, cc_addresses_json, subject,
                             sent_at, body_text, body_html, category, summary, created_at, updated_at
-                        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
-                        on conflict (user_id, gmail_message_id) do update set
-                            gmail_thread_id = excluded.gmail_thread_id,
+                        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
+                        on conflict (user_id, message_id) do update set
+                            thread_id = excluded.thread_id,
                             message_id_header = excluded.message_id_header,
                             in_reply_to = excluded.in_reply_to,
                             references_header = excluded.references_header,
                             from_address = excluded.from_address,
-                            to_addresses = excluded.to_addresses,
-                            cc_addresses = excluded.cc_addresses,
+                            to_addresses_json = excluded.to_addresses_json,
+                            cc_addresses_json = excluded.cc_addresses_json,
                             subject = excluded.subject,
                             sent_at = excluded.sent_at,
                             body_text = excluded.body_text,
@@ -68,7 +69,7 @@ public class EmailIntelligenceRepository {
                             summary = excluded.summary,
                             updated_at = now()
                         """,
-                message.messageId(), userId, message.messageId(), message.threadId(), message.messageIdHeader(),
+                userId, message.messageId(), message.threadId(), message.messageIdHeader(),
                 message.inReplyTo(), message.references(), message.fromAddress(), message.toAddresses(),
                 message.ccAddresses(), message.subject(), message.sentAt(), message.bodyText(), message.bodyHtml(),
                 category, summary
@@ -78,17 +79,17 @@ public class EmailIntelligenceRepository {
     public List<GmailThreadSnapshot> findRecentThreads(String userId, int limit) {
         return jdbcTemplate.query(
                 """
-                        select gmail_thread_id, history_id, subject, label_ids, last_message_at
+                        select thread_id, history_id, subject, label_ids_json, last_message_at
                         from email_thread
                         where user_id = ?
                         order by coalesce(last_message_at, updated_at) desc
                         limit ?
                         """,
                 (resultSet, rowNum) -> new GmailThreadSnapshot(
-                        resultSet.getString("gmail_thread_id"),
+                        resultSet.getString("thread_id"),
                         resultSet.getString("history_id"),
                         resultSet.getString("subject"),
-                        resultSet.getString("label_ids"),
+                        resultSet.getString("label_ids_json"),
                         resultSet.getObject("last_message_at", Instant.class),
                         List.of()
                 ),
@@ -99,10 +100,11 @@ public class EmailIntelligenceRepository {
     public Optional<ThreadTranscript> findThreadTranscript(String userId, String threadId) {
         List<ThreadTranscriptMessage> messages = jdbcTemplate.query(
                 """
-                        select gmail_message_id, gmail_thread_id, message_id_header, in_reply_to, references_header,
-                               from_address, to_addresses, cc_addresses, subject, sent_at, body_text, body_html, summary
+                        select message_id, thread_id, message_id_header, in_reply_to, references_header,
+                               from_address, to_addresses_json, cc_addresses_json, subject, sent_at,
+                               body_text, body_html, summary
                         from email_message
-                        where user_id = ? and gmail_thread_id = ?
+                        where user_id = ? and thread_id = ?
                         order by sent_at asc
                         """,
                 this::mapTranscriptMessage,
@@ -119,7 +121,7 @@ public class EmailIntelligenceRepository {
     public List<SourceCitation> findRecentSourceCitations(String userId, int limit) {
         return jdbcTemplate.query(
                 """
-                        select gmail_message_id, from_address, sent_at, coalesce(summary, substring(body_text from 1 for 180)) as snippet
+                        select message_id, from_address, sent_at, coalesce(summary, substring(body_text from 1 for 180)) as snippet
                         from email_message
                         where user_id = ?
                         order by sent_at desc
@@ -127,7 +129,7 @@ public class EmailIntelligenceRepository {
                         """,
                 (resultSet, rowNum) -> new SourceCitation(
                         "message",
-                        resultSet.getString("gmail_message_id"),
+                        resultSet.getString("message_id"),
                         resultSet.getString("from_address"),
                         resultSet.getObject("sent_at", Instant.class),
                         resultSet.getString("snippet")
@@ -138,14 +140,14 @@ public class EmailIntelligenceRepository {
 
     private ThreadTranscriptMessage mapTranscriptMessage(ResultSet resultSet, int rowNum) throws SQLException {
         return new ThreadTranscriptMessage(
-                resultSet.getString("gmail_message_id"),
-                resultSet.getString("gmail_thread_id"),
+                resultSet.getString("message_id"),
+                resultSet.getString("thread_id"),
                 resultSet.getString("message_id_header"),
                 resultSet.getString("in_reply_to"),
                 resultSet.getString("references_header"),
                 resultSet.getString("from_address"),
-                resultSet.getString("to_addresses"),
-                resultSet.getString("cc_addresses"),
+                resultSet.getString("to_addresses_json"),
+                resultSet.getString("cc_addresses_json"),
                 resultSet.getString("subject"),
                 resultSet.getObject("sent_at", Instant.class),
                 resultSet.getString("body_text"),
@@ -169,14 +171,14 @@ public class EmailIntelligenceRepository {
     }
 
     public record ThreadTranscriptMessage(
-            String gmailMessageId,
-            String gmailThreadId,
+            String messageId,
+            String threadId,
             String messageIdHeader,
             String inReplyTo,
             String referencesHeader,
             String fromAddress,
-            String toAddresses,
-            String ccAddresses,
+            String toAddressesJson,
+            String ccAddressesJson,
             String subject,
             Instant sentAt,
             String bodyText,

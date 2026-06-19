@@ -146,7 +146,7 @@ public class EmailIntelligenceService {
         conversationRepository.saveMessage(conversationId, "user", request.message(), "[]");
 
         String answer = aiOrchestratorService.answerQuestion(request.message(), evidence);
-        String citationsJson = citationsToJson(hits);
+        String citationsJson = citationsJson(hits);
         conversationRepository.saveMessage(conversationId, "assistant", answer, citationsJson);
         return new ChatResponse(conversationId, answer, toSourceCitations(hits));
     }

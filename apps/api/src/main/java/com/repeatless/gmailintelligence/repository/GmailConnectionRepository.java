@@ -20,7 +20,7 @@ public class GmailConnectionRepository {
     public Optional<GmailConnectionRecord> findByUserId(String userId) {
         return jdbcTemplate.query(
                 """
-                        select user_id, gmail_email, encrypted_access_token, encrypted_refresh_token,
+                        select user_id, email_address, access_token, encrypted_refresh_token,
                                access_token_expires_at, last_history_id, last_synced_at,
                                synced_thread_count, synced_message_count
                         from gmail_connection
@@ -35,13 +35,13 @@ public class GmailConnectionRepository {
         jdbcTemplate.update(
                 """
                         insert into gmail_connection(
-                            user_id, gmail_email, encrypted_access_token, encrypted_refresh_token,
+                            user_id, email_address, access_token, encrypted_refresh_token,
                             access_token_expires_at, last_history_id, last_synced_at,
                             synced_thread_count, synced_message_count
                         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         on conflict (user_id) do update set
-                            gmail_email = excluded.gmail_email,
-                            encrypted_access_token = excluded.encrypted_access_token,
+                            email_address = excluded.email_address,
+                            access_token = excluded.access_token,
                             encrypted_refresh_token = excluded.encrypted_refresh_token,
                             access_token_expires_at = excluded.access_token_expires_at,
                             last_history_id = excluded.last_history_id,
@@ -50,28 +50,17 @@ public class GmailConnectionRepository {
                             synced_message_count = excluded.synced_message_count,
                             updated_at = now()
                         """,
-                record.userId(), record.gmailEmail(), record.encryptedAccessToken(), record.encryptedRefreshToken(),
+                record.userId(), record.emailAddress(), record.accessToken(), record.encryptedRefreshToken(),
                 record.accessTokenExpiresAt(), record.lastHistoryId(), record.lastSyncedAt(),
                 record.syncedThreadCount(), record.syncedMessageCount()
-        );
-    }
-
-    public void updateSyncState(String userId, String historyId, Instant lastSyncedAt, long threadCount, long messageCount) {
-        jdbcTemplate.update(
-                """
-                        update gmail_connection
-                        set last_history_id = ?, last_synced_at = ?, synced_thread_count = ?, synced_message_count = ?, updated_at = now()
-                        where user_id = ?
-                        """,
-                historyId, lastSyncedAt, threadCount, messageCount, userId
         );
     }
 
     private GmailConnectionRecord mapRecord(ResultSet resultSet, int rowNum) throws SQLException {
         return new GmailConnectionRecord(
                 resultSet.getString("user_id"),
-                resultSet.getString("gmail_email"),
-                resultSet.getString("encrypted_access_token"),
+                resultSet.getString("email_address"),
+                resultSet.getString("access_token"),
                 resultSet.getString("encrypted_refresh_token"),
                 resultSet.getObject("access_token_expires_at", Instant.class),
                 resultSet.getString("last_history_id"),
@@ -83,8 +72,8 @@ public class GmailConnectionRepository {
 
     public record GmailConnectionRecord(
             String userId,
-            String gmailEmail,
-            String encryptedAccessToken,
+            String emailAddress,
+            String accessToken,
             String encryptedRefreshToken,
             Instant accessTokenExpiresAt,
             String lastHistoryId,

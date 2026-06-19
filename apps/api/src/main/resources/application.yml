@@ -6,9 +6,15 @@ spring:
     url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/gmail_intelligence}
     username: ${DATABASE_USERNAME:postgres}
     password: ${DATABASE_PASSWORD:postgres}
+    hikari:
+      connection-timeout: 30000
+      maximum-pool-size: 5
   flyway:
     enabled: true
     baseline-on-migrate: true
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/gmail_intelligence}
+    user: ${DATABASE_USERNAME:postgres}
+    password: ${DATABASE_PASSWORD:postgres}
   jackson:
     serialization:
       write-dates-as-timestamps: false

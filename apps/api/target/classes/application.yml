@@ -1,0 +1,36 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/gmail_intelligence}
+    username: ${DATABASE_USERNAME:postgres}
+    password: ${DATABASE_PASSWORD:postgres}
+    hikari:
+      connection-timeout: 30000
+      maximum-pool-size: 5
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/gmail_intelligence}
+    user: ${DATABASE_USERNAME:postgres}
+    password: ${DATABASE_PASSWORD:postgres}
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+app:
+  frontend-origin: ${FRONTEND_ORIGIN:http://localhost:5173}
+  gmail:
+    client-id: ${GMAIL_OAUTH_CLIENT_ID:}
+    client-secret: ${GMAIL_OAUTH_CLIENT_SECRET:}
+    redirect-uri: ${GMAIL_OAUTH_REDIRECT_URI:http://localhost:8080/api/oauth/google/callback}
+  ai:
+    gemini:
+      api-key: ${GEMINI_API_KEY:}
+      model: ${GEMINI_MODEL:gemini-1.5-pro}
+    nim:
+      api-key: ${NIM_API_KEY:}
+      model: ${NIM_MODEL:meta/llama-3.1-70b-instruct}
+  security:
+    token-encryption-key-base64: ${TOKEN_ENCRYPTION_KEY_BASE64:}
