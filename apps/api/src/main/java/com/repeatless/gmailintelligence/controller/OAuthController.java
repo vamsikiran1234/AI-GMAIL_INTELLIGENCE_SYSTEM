@@ -1,16 +1,17 @@
 package com.repeatless.gmailintelligence.controller;
 
-import java.util.Map;
+import java.net.URI;
 
 import jakarta.validation.constraints.NotBlank;
 
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.repeatless.gmailintelligence.config.AppProperties;
 import com.repeatless.gmailintelligence.dto.ApiDtos.OAuthCallbackResponse;
 import com.repeatless.gmailintelligence.dto.ApiDtos.OAuthStartResponse;
 import com.repeatless.gmailintelligence.service.GmailOAuthService;
@@ -20,9 +21,11 @@ import com.repeatless.gmailintelligence.service.GmailOAuthService;
 public class OAuthController {
 
     private final GmailOAuthService gmailOAuthService;
+    private final AppProperties properties;
 
-    public OAuthController(GmailOAuthService gmailOAuthService) {
+    public OAuthController(GmailOAuthService gmailOAuthService, AppProperties properties) {
         this.gmailOAuthService = gmailOAuthService;
+        this.properties = properties;
     }
 
     @GetMapping("/start")
@@ -31,7 +34,12 @@ public class OAuthController {
     }
 
     @GetMapping("/callback")
-    public OAuthCallbackResponse callback(@RequestParam String code, @RequestParam String state) {
-        return gmailOAuthService.handleAuthorizationCode(state, code);
+    public ResponseEntity<Void> callback(@RequestParam String code, @RequestParam String state) {
+        OAuthCallbackResponse result = gmailOAuthService.handleAuthorizationCode(state, code);
+        String redirectUrl = properties.frontendOrigin()
+                + "?userId=" + result.accountId()
+                + "&email=" + result.emailAddress()
+                + "&connected=true";
+        return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(redirectUrl)).build();
     }
 }

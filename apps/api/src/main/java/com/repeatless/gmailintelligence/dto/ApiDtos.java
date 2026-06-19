@@ -53,4 +53,24 @@ public final class ApiDtos {
 
     public record SourceCitation(String sourceType, String sourceId, String sender, Instant sentAt, String snippet) {
     }
+
+    public record ThreadListResponse(List<ThreadItem> threads, long total, int page, int pageSize) {
+    }
+
+    public record ThreadItem(String threadId, String subject, String category, String summary,
+            Instant lastMessageAt, int messageCount) {
+    }
+
+    public record ThreadMessagesResponse(String threadId, List<MessageItem> messages) {
+    }
+
+    public record MessageItem(String messageId, String threadId, String fromAddress, String subject,
+            Instant sentAt, String snippet, String summary, String category) {
+    }
+
+    public record SendRequest(@NotBlank String userId, @NotBlank String draftId) {
+    }
+
+    public record SendResponse(String gmailMessageId, String status) {
+    }
 }

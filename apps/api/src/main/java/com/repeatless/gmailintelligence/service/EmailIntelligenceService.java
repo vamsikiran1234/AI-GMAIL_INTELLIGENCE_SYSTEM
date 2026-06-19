@@ -16,10 +16,15 @@ import com.repeatless.gmailintelligence.dto.ApiDtos.ChatResponse;
 import com.repeatless.gmailintelligence.dto.ApiDtos.DraftRequest;
 import com.repeatless.gmailintelligence.dto.ApiDtos.DraftResponse;
 import com.repeatless.gmailintelligence.dto.ApiDtos.EmailSummaryResponse;
+import com.repeatless.gmailintelligence.dto.ApiDtos.MessageItem;
 import com.repeatless.gmailintelligence.dto.ApiDtos.NewsletterDigestResponse;
 import com.repeatless.gmailintelligence.dto.ApiDtos.NewsletterItemResponse;
+import com.repeatless.gmailintelligence.dto.ApiDtos.SendResponse;
 import com.repeatless.gmailintelligence.dto.ApiDtos.SourceCitation;
 import com.repeatless.gmailintelligence.dto.ApiDtos.SyncStatusResponse;
+import com.repeatless.gmailintelligence.dto.ApiDtos.ThreadItem;
+import com.repeatless.gmailintelligence.dto.ApiDtos.ThreadListResponse;
+import com.repeatless.gmailintelligence.dto.ApiDtos.ThreadMessagesResponse;
 import com.repeatless.gmailintelligence.dto.ApiDtos.ThreadSummaryResponse;
 import com.repeatless.gmailintelligence.model.GmailModels.GmailMessageSnapshot;
 import com.repeatless.gmailintelligence.model.GmailModels.GmailThreadSnapshot;
@@ -42,6 +47,37 @@ public class EmailIntelligenceService {
         this.gmailDataStore = gmailDataStore;
         this.aiOrchestratorService = aiOrchestratorService;
         this.conversationRepository = conversationRepository;
+    }
+
+    public ThreadListResponse listThreads(String userId, int page, int pageSize) {
+        int offset = page * pageSize;
+        List<GmailDataStore.ThreadListItem> rows = gmailDataStore.listThreadsPaged(userId, pageSize, offset);
+        long total = gmailDataStore.countThreads(userId);
+        List<ThreadItem> items = rows.stream()
+                .map(r -> new ThreadItem(r.threadId(), r.subject(), r.category(), r.summary(), r.lastMessageAt(), r.messageCount()))
+                .toList();
+        return new ThreadListResponse(items, total, page, pageSize);
+    }
+
+    public ThreadMessagesResponse listThreadMessages(String userId, String threadId) {
+        List<GmailDataStore.MessageListItem> rows = gmailDataStore.listMessagesForThread(userId, threadId);
+        List<MessageItem> items = rows.stream()
+                .map(r -> new MessageItem(r.messageId(), r.threadId(), r.fromAddress(), r.subject(), r.sentAt(), r.snippet(), r.summary(), r.category()))
+                .toList();
+        return new ThreadMessagesResponse(threadId, items);
+    }
+
+    public SendResponse sendDraft(String userId, String draftId) {
+        GmailDataStore.DraftRecord draft = gmailDataStore.findDraftById(userId, draftId)
+                .orElseThrow(() -> new IllegalStateException("Draft not found: " + draftId));
+        String accessToken = gmailOAuthService.resolveAccessToken(userId);
+        String senderEmail = gmailDataStore.findConnection(userId)
+                .map(GmailDataStore.GmailConnectionRecord::emailAddress)
+                .orElseThrow(() -> new IllegalStateException("No Gmail connection for user " + userId));
+        String raw = gmailApiClient.buildRawReply(senderEmail, draft.toAddress(), draft.subject(), draft.body(), draft.inReplyTo(), draft.references());
+        String gmailMessageId = gmailApiClient.sendMessage(accessToken, raw);
+        gmailDataStore.markDraftSent(userId, draftId, gmailMessageId);
+        return new SendResponse(gmailMessageId, "sent");
     }
 
     public SyncStatusResponse syncMailbox(String userId) {
@@ -122,14 +158,24 @@ public class EmailIntelligenceService {
     }
 
     public DraftResponse createDraft(DraftRequest request) {
-        String threadContext = request.threadId() == null || request.threadId().isBlank()
-                ? ""
-                : buildTranscript(gmailDataStore.loadThreadMessages(request.threadId()));
+        String threadContext = "";
+        String inReplyTo = "";
+        String references = "";
+        String toAddress = "";
+        if (request.threadId() != null && !request.threadId().isBlank()) {
+            List<GmailMessageSnapshot> messages = gmailDataStore.loadThreadMessages(request.threadId());
+            threadContext = buildTranscript(messages);
+            if (!messages.isEmpty()) {
+                GmailMessageSnapshot lastMsg = messages.getLast();
+                inReplyTo = lastMsg.messageIdHeader() == null ? "" : lastMsg.messageIdHeader();
+                references = lastMsg.references() == null ? "" : lastMsg.references();
+                toAddress = lastMsg.fromAddress() == null ? "" : lastMsg.fromAddress();
+            }
+        }
         String draftBody = aiOrchestratorService.draftEmail(request.prompt(), threadContext, request.mode());
-        String subject = request.mode() != null && request.mode().equalsIgnoreCase("reply")
-                ? "Re: email thread"
-                : "Draft email";
+        String subject = request.mode() != null && request.mode().equalsIgnoreCase("reply") ? "Re: email thread" : "Draft email";
         String draftId = UUID.randomUUID().toString();
+        gmailDataStore.saveDraft(draftId, request.userId(), request.threadId(), request.mode(), subject, draftBody, toAddress, inReplyTo, references);
         return new DraftResponse(draftId, subject, draftBody, citationsFromTranscript(threadContext));
     }
 

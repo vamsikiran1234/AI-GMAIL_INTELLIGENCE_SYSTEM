@@ -298,4 +298,86 @@ public class GmailDataStore {
 
     public record ThreadDigestRow(String threadId, String subject, String category, String summary, Instant latestMessageAt) {
     }
+
+    // ─── New methods for thread list, message list, draft save/send ───────────
+
+    public record ThreadListItem(String threadId, String subject, String category, String summary, Instant lastMessageAt, int messageCount) {
+    }
+
+    public List<ThreadListItem> listThreadsPaged(String userId, int limit, int offset) {
+        return jdbcTemplate.query("""
+                select thread_id, subject, category, summary, last_message_at, message_count
+                from email_thread
+                where user_id = :userId
+                order by last_message_at desc nulls last
+                limit :limit offset :offset
+                """, Map.of("userId", userId, "limit", limit, "offset", offset),
+                (rs, rowNum) -> new ThreadListItem(rs.getString("thread_id"), rs.getString("subject"),
+                        rs.getString("category"), rs.getString("summary"),
+                        rs.getTimestamp("last_message_at") == null ? null : rs.getTimestamp("last_message_at").toInstant(),
+                        rs.getInt("message_count")));
+    }
+
+    public long countThreads(String userId) {
+        Long count = jdbcTemplate.queryForObject("select count(*) from email_thread where user_id = :userId", Map.of("userId", userId), Long.class);
+        return count == null ? 0L : count;
+    }
+
+    public record MessageListItem(String messageId, String threadId, String fromAddress, String subject, Instant sentAt, String snippet, String summary, String category) {
+    }
+
+    public List<MessageListItem> listMessagesForThread(String userId, String threadId) {
+        return jdbcTemplate.query("""
+                select message_id, thread_id, from_address, subject, sent_at, snippet, summary, category
+                from email_message
+                where user_id = :userId and thread_id = :threadId
+                order by sent_at asc nulls last, raw_internal_date asc
+                """, Map.of("userId", userId, "threadId", threadId),
+                (rs, rowNum) -> new MessageListItem(rs.getString("message_id"), rs.getString("thread_id"),
+                        rs.getString("from_address"), rs.getString("subject"),
+                        rs.getTimestamp("sent_at") == null ? null : rs.getTimestamp("sent_at").toInstant(),
+                        rs.getString("snippet"), rs.getString("summary"), rs.getString("category")));
+    }
+
+    public void saveDraft(String draftId, String userId, String gmailThreadId, String mode,
+            String subject, String body, String toAddress, String inReplyTo, String references) {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("id", draftId); p.put("userId", userId);
+        p.put("gmailThreadId", gmailThreadId == null ? "" : gmailThreadId);
+        p.put("mode", mode); p.put("subject", subject); p.put("body", body);
+        p.put("toAddress", toAddress); p.put("inReplyTo", inReplyTo); p.put("references", references);
+        jdbcTemplate.update("""
+                insert into draft_email (id, user_id, gmail_thread_id, mode, subject, body,
+                    to_address, in_reply_to, references_header, status, citations_json, created_at, updated_at)
+                values (:id,:userId,:gmailThreadId,:mode,:subject,:body,
+                    :toAddress,:inReplyTo,:references,'draft','[]',now(),now())
+                on conflict (id) do update set body=excluded.body, updated_at=now()
+                """, p);
+    }
+
+    public record DraftRecord(String id, String userId, String gmailThreadId, String mode,
+            String subject, String body, String toAddress, String inReplyTo, String references) {
+    }
+
+    public Optional<DraftRecord> findDraftById(String userId, String draftId) {
+        List<DraftRecord> results = jdbcTemplate.query("""
+                select id, user_id, gmail_thread_id, mode, subject, body,
+                       coalesce(to_address,'') as to_address,
+                       coalesce(in_reply_to,'') as in_reply_to,
+                       coalesce(references_header,'') as references_header
+                from draft_email where user_id=:userId and id=:draftId
+                """, Map.of("userId", userId, "draftId", draftId),
+                (rs, rowNum) -> new DraftRecord(rs.getString("id"), rs.getString("user_id"),
+                        rs.getString("gmail_thread_id"), rs.getString("mode"),
+                        rs.getString("subject"), rs.getString("body"),
+                        rs.getString("to_address"), rs.getString("in_reply_to"), rs.getString("references_header")));
+        return results.stream().findFirst();
+    }
+
+    public void markDraftSent(String userId, String draftId, String gmailMessageId) {
+        jdbcTemplate.update("""
+                update draft_email set status='sent', gmail_message_id=:gmailMessageId, updated_at=now()
+                where user_id=:userId and id=:draftId
+                """, Map.of("userId", userId, "draftId", draftId, "gmailMessageId", gmailMessageId));
+    }
 }
