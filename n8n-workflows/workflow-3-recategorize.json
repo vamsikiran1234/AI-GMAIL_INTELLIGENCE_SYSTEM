@@ -1,0 +1,115 @@
+{
+  "name": "Workflow 3 - Daily Re-categorization",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-daily",
+      "name": "Daily at 2 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT et.user_id, et.thread_id FROM email_thread et WHERE (et.category IS NULL OR et.summary IS NULL) AND et.created_at > now() - interval '7 days' LIMIT 100",
+        "options": {}
+      },
+      "id": "postgres-uncategorized",
+      "name": "Find Uncategorized Threads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-threads",
+      "name": "Process One Thread At A Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.API_BASE_URL }}/threads/{{ $json.thread_id }}/summary?userId={{ $json.user_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "ngrok-skip-browser-warning",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "http-summarize",
+      "name": "Request Thread Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "wait-rate-limit",
+      "name": "Wait 2s (Rate Limit)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1120, 300],
+      "webhookId": "rate-limit-wait"
+    }
+  ],
+  "connections": {
+    "Daily at 2 AM": {
+      "main": [
+        [{ "node": "Find Uncategorized Threads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Find Uncategorized Threads": {
+      "main": [
+        [{ "node": "Process One Thread At A Time", "type": "main", "index": 0 }]
+      ]
+    },
+    "Process One Thread At A Time": {
+      "main": [
+        [{ "node": "Request Thread Summary", "type": "main", "index": 0 }]
+      ]
+    },
+    "Request Thread Summary": {
+      "main": [
+        [{ "node": "Wait 2s (Rate Limit)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait 2s (Rate Limit)": {
+      "main": [
+        [{ "node": "Process One Thread At A Time", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

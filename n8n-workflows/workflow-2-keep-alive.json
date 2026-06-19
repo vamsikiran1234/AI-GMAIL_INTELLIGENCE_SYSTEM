@@ -1,0 +1,108 @@
+{
+  "name": "Workflow 2 - Keep Backend Alive",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "id": "cron-keep-alive",
+      "name": "Every 10 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.API_BASE_URL }}/health",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "ngrok-skip-browser-warning",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "http-health-ping",
+      "name": "Ping Health Endpoint",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "health-check",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "ok",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "check-health",
+      "name": "Backend Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "console.log('Backend healthy at', new Date().toISOString());\nreturn $input.all();"
+      },
+      "id": "log-healthy",
+      "name": "Log Healthy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "console.error('Backend DOWN at', new Date().toISOString(), JSON.stringify($input.item.json));\nreturn $input.all();"
+      },
+      "id": "log-down",
+      "name": "Log Backend Down",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 400]
+    }
+  ],
+  "connections": {
+    "Every 10 Minutes": {
+      "main": [
+        [{ "node": "Ping Health Endpoint", "type": "main", "index": 0 }]
+      ]
+    },
+    "Ping Health Endpoint": {
+      "main": [
+        [{ "node": "Backend Healthy?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Backend Healthy?": {
+      "main": [
+        [{ "node": "Log Healthy", "type": "main", "index": 0 }],
+        [{ "node": "Log Backend Down", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
