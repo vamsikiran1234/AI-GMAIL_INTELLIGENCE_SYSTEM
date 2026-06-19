@@ -35,11 +35,20 @@ public class OAuthController {
 
     @GetMapping("/callback")
     public ResponseEntity<Void> callback(@RequestParam String code, @RequestParam String state) {
-        OAuthCallbackResponse result = gmailOAuthService.handleAuthorizationCode(state, code);
-        String redirectUrl = properties.frontendOrigin()
-                + "?userId=" + result.accountId()
-                + "&email=" + result.emailAddress()
-                + "&connected=true";
-        return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(redirectUrl)).build();
+        try {
+            OAuthCallbackResponse result = gmailOAuthService.handleAuthorizationCode(state, code);
+            String redirectUrl = properties.frontendOrigin()
+                    + "?userId=" + result.accountId()
+                    + "&email=" + result.emailAddress()
+                    + "&connected=true";
+            return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(redirectUrl)).build();
+        } catch (Exception ex) {
+            // Redirect to frontend with error so user sees a readable message instead of 500
+            String errorMessage = java.net.URLEncoder.encode(
+                    ex.getMessage() != null ? ex.getMessage() : "OAuth callback failed",
+                    java.nio.charset.StandardCharsets.UTF_8);
+            String redirectUrl = properties.frontendOrigin() + "?error=" + errorMessage;
+            return ResponseEntity.status(HttpStatus.FOUND).location(URI.create(redirectUrl)).build();
+        }
     }
 }

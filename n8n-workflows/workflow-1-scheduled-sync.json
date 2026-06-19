@@ -142,7 +142,8 @@
     },
     "Process One User At A Time": {
       "main": [
-        [{ "node": "Trigger Sync For User", "type": "main", "index": 0 }]
+        [{ "node": "Trigger Sync For User", "type": "main", "index": 0 }],
+        [{ "node": "Mark Sync Successful", "type": "main", "index": 0 }]
       ]
     },
     "Trigger Sync For User": {

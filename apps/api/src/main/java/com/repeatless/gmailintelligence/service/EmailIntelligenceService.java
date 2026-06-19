@@ -180,9 +180,15 @@ public class EmailIntelligenceService {
     }
 
     public ChatResponse answerQuestion(ChatRequest request) {
-        List<Double> embedding = aiOrchestratorService.embed(request.message());
-        List<com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit> hits = gmailDataStore.searchRelevantContent(
-                request.userId(), embedding, 6);
+        // Try semantic search first; fall back to recent emails if embedding unavailable
+        List<com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit> hits;
+        try {
+            List<Double> embedding = aiOrchestratorService.embed(request.message());
+            hits = gmailDataStore.searchRelevantContent(request.userId(), embedding, 6);
+        } catch (Exception embeddingException) {
+            // Embedding API unavailable — answer from recent threads instead
+            hits = List.of();
+        }
         String evidence = buildEvidenceBundle(hits);
 
         String conversationId = request.conversationId();
@@ -226,15 +232,26 @@ public class EmailIntelligenceService {
                     messageSnapshot.bodyText());
             String messageCategory = normalizeCategory(aiOrchestratorService.categorizeEmail(messageSnapshot.bodyText()));
             gmailDataStore.saveMessage(userId, messageSnapshot, truncate(messageSnapshot.bodyText()), messageSummary, messageCategory);
-            List<Double> messageEmbedding = aiOrchestratorService.embed(messageSummary + "\n" + messageSnapshot.bodyText());
-            gmailDataStore.saveEmbedding(userId, "message", messageSnapshot.messageId(), messageSnapshot.threadId(),
-                    messageSummary, messageEmbedding, messageSnapshot.fromAddress(), messageSnapshot.sentAt());
+            // Embedding is best-effort — don't fail sync if AI embedding is unavailable
+            try {
+                List<Double> messageEmbedding = aiOrchestratorService.embed(messageSummary + "\n" + messageSnapshot.bodyText());
+                gmailDataStore.saveEmbedding(userId, "message", messageSnapshot.messageId(), messageSnapshot.threadId(),
+                        messageSummary, messageEmbedding, messageSnapshot.fromAddress(), messageSnapshot.sentAt());
+            } catch (Exception embeddingException) {
+                // Log and continue — thread/message data is saved, embeddings can be retried later
+                System.err.println("[SYNC] Embedding skipped for message " + messageSnapshot.messageId() + ": " + embeddingException.getMessage());
+            }
         }
 
-        List<Double> threadEmbedding = aiOrchestratorService.embed(summary + "\n" + transcript);
-        gmailDataStore.saveEmbedding(userId, "thread", threadSnapshot.threadId(), threadSnapshot.threadId(), summary,
-                threadEmbedding, threadSnapshot.messages().isEmpty() ? "" : threadSnapshot.messages().getFirst().fromAddress(),
-                threadSnapshot.updatedAt());
+        try {
+            String threadSummaryText = summary + "\n" + transcript;
+            List<Double> threadEmbedding = aiOrchestratorService.embed(threadSummaryText);
+            gmailDataStore.saveEmbedding(userId, "thread", threadSnapshot.threadId(), threadSnapshot.threadId(), summary,
+                    threadEmbedding, threadSnapshot.messages().isEmpty() ? "" : threadSnapshot.messages().getFirst().fromAddress(),
+                    threadSnapshot.updatedAt());
+        } catch (Exception embeddingException) {
+            System.err.println("[SYNC] Embedding skipped for thread " + threadSnapshot.threadId() + ": " + embeddingException.getMessage());
+        }
     }
 
     private String buildTranscript(List<GmailMessageSnapshot> messages) {

@@ -6,7 +6,12 @@ import ThreadDetail from './components/ThreadDetail';
 
 function readUrlParams() {
   const p = new URLSearchParams(window.location.search);
-  return { userId: p.get('userId'), email: p.get('email'), connected: p.get('connected') === 'true' };
+  return {
+    userId: p.get('userId'),
+    email: p.get('email'),
+    connected: p.get('connected') === 'true',
+    error: p.get('error'),
+  };
 }
 
 export default function App() {
@@ -30,8 +35,11 @@ export default function App() {
   const [sendResult, setSendResult] = useState<string | null>(null);
 
   useEffect(() => {
-    const { userId: uid, email, connected } = readUrlParams();
-    if (connected && uid) {
+    const { userId: uid, email, connected, error } = readUrlParams();
+    if (error) {
+      setSyncStatus(`OAuth error: ${decodeURIComponent(error)}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (connected && uid) {
       setUserId(uid);
       setConnectedEmail(email);
       window.history.replaceState({}, '', window.location.pathname);
