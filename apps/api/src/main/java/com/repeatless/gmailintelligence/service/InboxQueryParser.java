@@ -201,7 +201,7 @@ public class InboxQueryParser {
         "show", "find", "get", "give", "tell", "list",
         "can", "did", "does", "any", "all", "some",
         "email", "emails", "mail", "inbox", "latest",
-        "recent", "today", "yesterday", "last", "this", "week",
+        "recent", "today", "yesterday", "last", "week",
         "month", "year", "days", "new", "old"
     );
 

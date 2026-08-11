@@ -392,7 +392,7 @@ public class EmailIntelligenceService {
                 .map(c -> "{\"sourceType\":\"" + escapeJson(c.sourceType())
                         + "\",\"sourceId\":\"" + escapeJson(c.sourceId())
                         + "\",\"sender\":\"" + escapeJson(c.sender())
-                        + "\",\"snippet\":\"" + escapeJson(c.snippet()) + "\"}")
+                        + "\",\"snippet\":\"" + escapeJson(sanitizeSnippet(c.snippet())) + "\"}")
                 .collect(Collectors.joining(",", "[", "]"));
     }
 
@@ -530,8 +530,10 @@ public class EmailIntelligenceService {
 
     private String citationsJson(List<com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit> hits) {
         return hits.stream()
-                .map(hit -> "{\"sourceType\":\"" + hit.sourceType() + "\",\"sourceId\":\"" + hit.sourceId()
-                        + "\",\"sender\":\"" + escapeJson(hit.sender()) + "\",\"snippet\":\"" + escapeJson(hit.snippet()) + "\"}")
+                .map(hit -> "{\"sourceType\":\"" + escapeJson(hit.sourceType())
+                        + "\",\"sourceId\":\"" + escapeJson(hit.sourceId())
+                        + "\",\"sender\":\"" + escapeJson(hit.sender())
+                        + "\",\"snippet\":\"" + escapeJson(sanitizeSnippet(hit.snippet())) + "\"}")
                 .collect(Collectors.joining(",", "[", "]"));
     }
 
@@ -619,8 +621,47 @@ public class EmailIntelligenceService {
         return embedding.stream().map(value -> String.format(java.util.Locale.ROOT, "%f", value)).collect(Collectors.joining(",", "[", "]"));
     }
 
+    /**
+     * Escapes a string for safe embedding inside a JSON string value.
+     * Handles backslash, double-quote, and all control characters (0x00-0x1F)
+     * including CR (0x0D), LF (0x0A), and TAB (0x09) which PostgreSQL JSONB
+     * rejects when left unescaped.
+     */
     private String escapeJson(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        if (value == null) return "";
+        StringBuilder sb = new StringBuilder(value.length() + 16);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '"'  -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\r' -> sb.append("\\r");
+                case '\n' -> sb.append("\\n");
+                case '\t' -> sb.append("\\t");
+                default   -> {
+                    if (c < 0x20) {
+                        // Other ASCII control characters — escape as JSON unicode sequence
+                        sb.append("\\u").append(String.format("%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Strips HTML tags and collapses whitespace from an email snippet/body
+     * so it is safe and readable as a citation snippet.
+     */
+    private String sanitizeSnippet(String raw) {
+        if (raw == null || raw.isBlank()) return "";
+        // Strip HTML tags
+        String plain = raw.replaceAll("<[^>]*>", " ");
+        // Collapse all whitespace (including \r, \n, \t) into single spaces
+        plain = plain.replaceAll("[\\s\\r\\n\\t]+", " ").strip();
+        return plain.length() <= 240 ? plain : plain.substring(0, 240);
     }
 
     private record NewsletterCandidate(String title, String summary, String source, String threadId) {
