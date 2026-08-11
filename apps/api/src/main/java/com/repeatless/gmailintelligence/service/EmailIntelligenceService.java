@@ -38,15 +38,24 @@ public class EmailIntelligenceService {
     private final GmailDataStore gmailDataStore;
     private final AiOrchestratorService aiOrchestratorService;
     private final ConversationRepository conversationRepository;
+    private final InboxQueryParser inboxQueryParser;
+    private final DateRangeResolver dateRangeResolver;
+    private final InboxRelevanceRanker inboxRelevanceRanker;
 
     public EmailIntelligenceService(GmailOAuthService gmailOAuthService, GmailApiClient gmailApiClient,
             GmailDataStore gmailDataStore, AiOrchestratorService aiOrchestratorService,
-            ConversationRepository conversationRepository) {
+            ConversationRepository conversationRepository,
+            InboxQueryParser inboxQueryParser,
+            DateRangeResolver dateRangeResolver,
+            InboxRelevanceRanker inboxRelevanceRanker) {
         this.gmailOAuthService = gmailOAuthService;
         this.gmailApiClient = gmailApiClient;
         this.gmailDataStore = gmailDataStore;
         this.aiOrchestratorService = aiOrchestratorService;
         this.conversationRepository = conversationRepository;
+        this.inboxQueryParser = inboxQueryParser;
+        this.dateRangeResolver = dateRangeResolver;
+        this.inboxRelevanceRanker = inboxRelevanceRanker;
     }
 
     public ThreadListResponse listThreads(String userId, int page, int pageSize) {
@@ -80,41 +89,98 @@ public class EmailIntelligenceService {
         return new SendResponse(gmailMessageId, "sent");
     }
 
+    /**
+     * Syncs the mailbox for the given user.
+     *
+     * Fixes applied here:
+     * 1. 401 auto-recovery — if any Gmail API call returns 401 (stale token), the
+     *    access token is force-refreshed exactly once and the entire sync is retried.
+     *    This handles the common case where the stored access token has expired but
+     *    the recorded expiry in the DB is stale/wrong.
+     * 2. Initial-sync page cap — the first sync fetches at most {@code INITIAL_SYNC_PAGE_LIMIT}
+     *    pages of {@code INITIAL_SYNC_PAGE_SIZE} threads. This keeps the HTTP request
+     *    well within the browser's default timeout. Subsequent incremental syncs are
+     *    always fast because they only process threads that changed since the last
+     *    historyId checkpoint.
+     */
     public SyncStatusResponse syncMailbox(String userId) {
         String accessToken = gmailOAuthService.resolveAccessToken(userId);
+        try {
+            return doSync(userId, accessToken, false);
+        } catch (Exception ex) {
+            if (GmailApiClient.isAuthError(ex)) {
+                // Stored token was invalid — force a refresh and retry once
+                System.out.println("[EmailIntelligenceService] 401 on sync, force-refreshing token for user " + userId);
+                String freshToken = gmailOAuthService.forceRefreshAccessToken(userId);
+                return doSync(userId, freshToken, false);
+            }
+            throw ex;
+        }
+    }
+
+    // ── sync implementation ───────────────────────────────────────────────────
+
+    /**
+     * Maximum number of pages fetched on the very first (initial) sync.
+     * Each page is {@code INITIAL_SYNC_PAGE_SIZE} threads.
+     * 3 pages × 20 threads = up to 60 threads on the first call, which completes
+     * well within 30 seconds for any inbox.
+     */
+    private static final int INITIAL_SYNC_PAGE_SIZE  = 20;
+    private static final int INITIAL_SYNC_PAGE_LIMIT = 3;
+
+    private SyncStatusResponse doSync(String userId, String accessToken, boolean isRetry) {
         GmailDataStore.SyncCursorRecord cursor = gmailDataStore.findSyncCursor(userId).orElse(null);
 
-        long syncedThreads = 0;
+        long syncedThreads  = 0;
         long syncedMessages = 0;
         String latestHistoryId = cursor == null ? null : cursor.lastHistoryId();
 
         if (cursor == null || cursor.lastHistoryId() == null || cursor.lastHistoryId().isBlank()) {
+            // ── Initial sync: paginate inbox, cap at INITIAL_SYNC_PAGE_LIMIT pages ──
             String nextPageToken = null;
+            int pagesProcessed = 0;
             do {
-                GmailApiClient.ThreadPage page = gmailApiClient.listThreadsPage(accessToken, nextPageToken, 100);
+                GmailApiClient.ThreadPage page =
+                        gmailApiClient.listThreadsPage(accessToken, nextPageToken, INITIAL_SYNC_PAGE_SIZE);
                 for (GmailThreadSnapshot threadSnapshot : page.threads()) {
                     persistThread(userId, threadSnapshot);
                     syncedThreads++;
                     syncedMessages += threadSnapshot.messages().size();
-                    latestHistoryId = threadSnapshot.historyId();
+                    if (threadSnapshot.historyId() != null && !threadSnapshot.historyId().isBlank()) {
+                        latestHistoryId = threadSnapshot.historyId();
+                    }
                 }
                 nextPageToken = page.nextPageToken();
-            } while (nextPageToken != null && !nextPageToken.isBlank());
+                pagesProcessed++;
+            } while (nextPageToken != null && !nextPageToken.isBlank()
+                    && pagesProcessed < INITIAL_SYNC_PAGE_LIMIT);
+
+            // Save cursor even if we stopped early — the next sync will be incremental
             gmailDataStore.saveSyncCursor(userId, latestHistoryId, Instant.now(), "initial");
+
         } else {
+            // ── Incremental sync: only fetch threads changed since last historyId ──
             String nextPageToken = null;
             Map<String, String> changedThreadIds = new LinkedHashMap<>();
             do {
-                GmailApiClient.HistoryPage historyPage = gmailApiClient.listThreadIdsFromHistory(accessToken, cursor.lastHistoryId(), nextPageToken);
+                GmailApiClient.HistoryPage historyPage =
+                        gmailApiClient.listThreadIdsFromHistory(accessToken, cursor.lastHistoryId(), nextPageToken);
                 for (String threadId : historyPage.threadIds()) {
                     changedThreadIds.put(threadId, threadId);
                 }
                 latestHistoryId = historyPage.latestHistoryId();
-                nextPageToken = historyPage.nextPageToken();
+                nextPageToken   = historyPage.nextPageToken();
             } while (nextPageToken != null && !nextPageToken.isBlank());
 
             for (String threadId : changedThreadIds.keySet()) {
-                GmailThreadSnapshot threadSnapshot = gmailApiClient.fetchThread(accessToken, threadId);
+                // Use fetchThreadOrFallback so a deleted/trashed thread (404) does not
+                // abort the entire incremental sync — it is simply skipped gracefully.
+                GmailThreadSnapshot threadSnapshot = gmailApiClient.fetchThreadOrFallback(accessToken, threadId);
+                if (threadSnapshot.messages().isEmpty() && threadSnapshot.historyId().isBlank()) {
+                    // Fallback skeleton — thread was deleted/trashed, nothing to persist
+                    continue;
+                }
                 persistThread(userId, threadSnapshot);
                 syncedThreads++;
                 syncedMessages += threadSnapshot.messages().size();
@@ -122,13 +188,16 @@ public class EmailIntelligenceService {
             gmailDataStore.saveSyncCursor(userId, latestHistoryId, Instant.now(), "incremental");
         }
 
+        // Persist the fresh/confirmed access token back to the connection record
         GmailDataStore.GmailConnectionRecord activeConnection = gmailOAuthService.requireActiveConnection(userId);
-        gmailDataStore.saveConnection(userId,
-            activeConnection.emailAddress(),
-            activeConnection.encryptedRefreshToken(),
-            accessToken,
-            Instant.now().plusSeconds(3600),
-            latestHistoryId);
+        gmailDataStore.saveConnection(
+                userId,
+                activeConnection.emailAddress(),
+                activeConnection.encryptedRefreshToken(),
+                accessToken,
+                Instant.now().plusSeconds(3600),
+                latestHistoryId);
+
         return new SyncStatusResponse("completed", Instant.now(), syncedThreads, syncedMessages);
     }
 
@@ -180,27 +249,165 @@ public class EmailIntelligenceService {
     }
 
     public ChatResponse answerQuestion(ChatRequest request) {
-        // Try semantic search first; fall back to recent emails if embedding unavailable
-        List<com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit> hits;
-        try {
-            List<Double> embedding = aiOrchestratorService.embed(request.message());
-            hits = gmailDataStore.searchRelevantContent(request.userId(), embedding, 6);
-        } catch (Exception embeddingException) {
-            // Embedding API unavailable — answer from recent threads instead
-            hits = List.of();
-        }
-        String evidence = buildEvidenceBundle(hits);
+        // ── 1. Parse intent, date, keywords from natural language ─────────────
+        InboxQueryParser.InboxQuery query = inboxQueryParser.parse(request.message());
 
+        // ── 2. Resolve date range (null token → last 30 days default) ─────────
+        DateRangeResolver.DateRange dateRange = dateRangeResolver.resolve(query.dateToken());
+
+        // ── 3. Map intent to DB category filter ───────────────────────────────
+        String categoryFilter = intentToCategoryFilter(query.intent());
+
+        // ── 4. Structured inbox search ─────────────────────────────────────────
+        // Fetch up to 40 raw candidates; ranker will trim to the best 15.
+        List<GmailDataStore.InboxSearchHit> rawHits = gmailDataStore.searchInbox(
+                request.userId(),
+                dateRange.from(),
+                dateRange.to(),
+                categoryFilter,
+                query.sender(),
+                query.keywords(),
+                40);
+
+        // ── 5. Rank + filter by relevance ──────────────────────────────────────
+        List<InboxRelevanceRanker.RankedHit> ranked =
+                inboxRelevanceRanker.rank(rawHits, query, 15);
+
+        // ── 6. Build evidence bundle from ranked hits ──────────────────────────
+        String evidence = buildInboxEvidenceBundle(ranked, dateRange, query);
+
+        // ── 7. Persist conversation ────────────────────────────────────────────
         String conversationId = request.conversationId();
         if (conversationId == null || conversationId.isBlank()) {
-            conversationId = conversationRepository.createConversation(request.userId(), "Email assistant chat");
+            conversationId = conversationRepository.createConversation(
+                    request.userId(), "Email assistant chat");
         }
         conversationRepository.saveMessage(conversationId, "user", request.message(), "[]");
 
-        String answer = aiOrchestratorService.answerQuestion(request.message(), evidence);
-        String citationsJson = citationsJson(hits);
+        // ── 8. Generate answer ─────────────────────────────────────────────────
+        String answer = aiOrchestratorService.answerFromInboxSearch(
+                request.message(), evidence, ranked.size(), dateRange.label());
+
+        // ── 9. Build citations from ranked hits ────────────────────────────────
+        List<SourceCitation> citations = ranked.stream()
+                .map(rh -> new SourceCitation(
+                        "message",
+                        rh.hit().messageId(),
+                        rh.hit().fromAddress(),
+                        rh.hit().sentAt(),
+                        truncate(rh.hit().snippet() != null
+                                ? rh.hit().snippet()
+                                : rh.hit().subject())))
+                .toList();
+
+        String citationsJson = buildCitationsJson(citations);
         conversationRepository.saveMessage(conversationId, "assistant", answer, citationsJson);
-        return new ChatResponse(conversationId, answer, toSourceCitations(hits));
+
+        // ── 10. If structured search returned nothing, fall back to semantic RAG ─
+        if (ranked.isEmpty()) {
+            return fallbackSemanticAnswer(request, conversationId, answer);
+        }
+
+        return new ChatResponse(conversationId, answer, citations);
+    }
+
+    /**
+     * Semantic RAG fallback — used when the structured inbox search returns no results.
+     * Embeds the question and searches pgvector, then generates an answer from
+     * whatever evidence exists. This handles open-ended questions that aren't
+     * inbox-search requests (e.g. "What was agreed in the project meeting?").
+     */
+    private ChatResponse fallbackSemanticAnswer(ChatRequest request, String conversationId,
+            String noResultsAnswer) {
+        try {
+            List<Double> embedding = aiOrchestratorService.embed(request.message());
+            List<com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit> hits =
+                    gmailDataStore.searchRelevantContent(request.userId(), embedding, 6);
+
+            if (hits.isEmpty()) {
+                // Nothing in semantic index either — return the no-results message
+                return new ChatResponse(conversationId, noResultsAnswer, List.of());
+            }
+
+            String evidence = buildEvidenceBundle(hits);
+            String answer   = aiOrchestratorService.answerQuestion(request.message(), evidence);
+
+            String citationsJson = citationsJson(hits);
+            conversationRepository.saveMessage(conversationId, "assistant", answer, citationsJson);
+
+            return new ChatResponse(conversationId, answer, toSourceCitations(hits));
+        } catch (Exception e) {
+            return new ChatResponse(conversationId, noResultsAnswer, List.of());
+        }
+    }
+
+    // ─── evidence builders ────────────────────────────────────────────────────
+
+    /**
+     * Formats ranked inbox hits into a structured text bundle for the AI.
+     * Includes date range context and email count so the model can say
+     * "I found N emails from [range]" rather than "no evidence provided".
+     */
+    private String buildInboxEvidenceBundle(
+            List<InboxRelevanceRanker.RankedHit> ranked,
+            DateRangeResolver.DateRange dateRange,
+            InboxQueryParser.InboxQuery query) {
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Search context:\n");
+        sb.append("  Date range: ").append(dateRange.label()).append("\n");
+        sb.append("  Intent: ").append(query.intent()).append("\n");
+        sb.append("  Results found: ").append(ranked.size()).append("\n\n");
+
+        if (ranked.isEmpty()) {
+            sb.append("No matching emails found in the inbox for this search.\n");
+            return sb.toString();
+        }
+
+        java.time.format.DateTimeFormatter fmt =
+            java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")
+                .withZone(java.time.ZoneId.systemDefault());
+
+        for (int i = 0; i < ranked.size(); i++) {
+            GmailDataStore.InboxSearchHit hit = ranked.get(i).hit();
+            sb.append("--- Email ").append(i + 1).append(" ---\n");
+            sb.append("From:    ").append(nullSafe(hit.fromAddress())).append("\n");
+            sb.append("Date:    ").append(hit.sentAt() != null ? fmt.format(hit.sentAt()) : "unknown").append("\n");
+            sb.append("Subject: ").append(nullSafe(hit.subject())).append("\n");
+            sb.append("Category:").append(nullSafe(hit.category())).append("\n");
+            // Include the first 400 chars of body so the AI has real content
+            String body = hit.bodyText() != null && !hit.bodyText().isBlank()
+                    ? hit.bodyText() : hit.snippet();
+            if (body != null && !body.isBlank()) {
+                sb.append("Content: ").append(body.length() > 400
+                        ? body.substring(0, 400) + "…" : body).append("\n");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    private String buildCitationsJson(List<SourceCitation> citations) {
+        return citations.stream()
+                .map(c -> "{\"sourceType\":\"" + escapeJson(c.sourceType())
+                        + "\",\"sourceId\":\"" + escapeJson(c.sourceId())
+                        + "\",\"sender\":\"" + escapeJson(c.sender())
+                        + "\",\"snippet\":\"" + escapeJson(c.snippet()) + "\"}")
+                .collect(Collectors.joining(",", "[", "]"));
+    }
+
+    private String nullSafe(String s) { return s == null ? "" : s; }
+
+    /** Maps detected intent to the category prefix stored in the DB. */
+    private String intentToCategoryFilter(InboxQueryParser.Intent intent) {
+        return switch (intent) {
+            case JOB_SEARCH   -> "JOB";
+            case FINANCE      -> "FINANCE";
+            case NEWSLETTER   -> "NEWSLETTER";
+            case NOTIFICATION -> "NOTIFICATION";
+            case WORK         -> "WORK";
+            case GENERAL      -> null; // no category filter for general queries
+        };
     }
 
     public NewsletterDigestResponse buildNewsletterDigest(String userId, int days) {
@@ -222,36 +429,63 @@ public class EmailIntelligenceService {
 
     private void persistThread(String userId, GmailThreadSnapshot threadSnapshot) {
         String transcript = buildTranscript(threadSnapshot.messages());
-        String summary = aiOrchestratorService.summarizeThread(transcript);
-        String category = normalizeCategory(aiOrchestratorService.categorizeEmail(transcript));
+        String summary = buildLocalThreadSummary(threadSnapshot, transcript);
+        String category = inferLocalCategory(threadSnapshot.subject(), transcript);
         gmailDataStore.saveThread(userId, threadSnapshot, summary, category);
 
         for (GmailMessageSnapshot messageSnapshot : threadSnapshot.messages()) {
-            String messageSummary = aiOrchestratorService.generateWithFallback(
-                    "Summarize this email message in one sentence. Keep it factual.",
-                    messageSnapshot.bodyText());
-            String messageCategory = normalizeCategory(aiOrchestratorService.categorizeEmail(messageSnapshot.bodyText()));
+            String messageSummary = buildLocalMessageSummary(messageSnapshot);
+            String messageCategory = inferLocalCategory(messageSnapshot.subject(), messageSnapshot.bodyText());
             gmailDataStore.saveMessage(userId, messageSnapshot, truncate(messageSnapshot.bodyText()), messageSummary, messageCategory);
-            // Embedding is best-effort — don't fail sync if AI embedding is unavailable
-            try {
-                List<Double> messageEmbedding = aiOrchestratorService.embed(messageSummary + "\n" + messageSnapshot.bodyText());
-                gmailDataStore.saveEmbedding(userId, "message", messageSnapshot.messageId(), messageSnapshot.threadId(),
-                        messageSummary, messageEmbedding, messageSnapshot.fromAddress(), messageSnapshot.sentAt());
-            } catch (Exception embeddingException) {
-                // Log and continue — thread/message data is saved, embeddings can be retried later
-                System.err.println("[SYNC] Embedding skipped for message " + messageSnapshot.messageId() + ": " + embeddingException.getMessage());
-            }
         }
 
-        try {
-            String threadSummaryText = summary + "\n" + transcript;
-            List<Double> threadEmbedding = aiOrchestratorService.embed(threadSummaryText);
-            gmailDataStore.saveEmbedding(userId, "thread", threadSnapshot.threadId(), threadSnapshot.threadId(), summary,
-                    threadEmbedding, threadSnapshot.messages().isEmpty() ? "" : threadSnapshot.messages().getFirst().fromAddress(),
-                    threadSnapshot.updatedAt());
-        } catch (Exception embeddingException) {
-            System.err.println("[SYNC] Embedding skipped for thread " + threadSnapshot.threadId() + ": " + embeddingException.getMessage());
+    }
+
+    private String buildLocalThreadSummary(GmailThreadSnapshot threadSnapshot, String transcript) {
+        if (threadSnapshot.messages().isEmpty()) {
+            return truncate(threadSnapshot.subject());
         }
+        String firstMessage = threadSnapshot.messages().getFirst().bodyText();
+        String body = (firstMessage == null || firstMessage.isBlank()) ? transcript : firstMessage;
+        return truncate((threadSnapshot.subject() == null || threadSnapshot.subject().isBlank() ? "Thread" : threadSnapshot.subject())
+                + " - " + body);
+    }
+
+    private String buildLocalMessageSummary(GmailMessageSnapshot messageSnapshot) {
+        String body = messageSnapshot.bodyText();
+        if (body == null || body.isBlank()) {
+            body = messageSnapshot.subject();
+        }
+        return truncate(body);
+    }
+
+    private String inferLocalCategory(String subject, String content) {
+        String text = ((subject == null ? "" : subject) + " " + (content == null ? "" : content)).toLowerCase();
+        if (containsAny(text, "newsletter", "unsubscribe", "digest", "weekly", "roundup")) {
+            return "NEWSLETTERS";
+        }
+        if (containsAny(text, "interview", "resume", "application", "hiring", "recruiter", "candidate")) {
+            return "JOB / RECRUITMENT";
+        }
+        if (containsAny(text, "receipt", "invoice", "payment", "refund", "bank", "card")) {
+            return "FINANCE";
+        }
+        if (containsAny(text, "no-reply", "noreply", "notification", "alert", "security", "verification")) {
+            return "NOTIFICATIONS";
+        }
+        if (containsAny(text, "meeting", "project", "deadline", "team", "client", "proposal")) {
+            return "WORK / PROFESSIONAL";
+        }
+        return "PERSONAL";
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        for (String keyword : keywords) {
+            if (text.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String buildTranscript(List<GmailMessageSnapshot> messages) {

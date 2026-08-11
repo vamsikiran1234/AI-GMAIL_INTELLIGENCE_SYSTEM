@@ -2,12 +2,14 @@ package com.repeatless.gmailintelligence.service;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -25,27 +27,53 @@ import com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit;
 public class GmailDataStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final JdbcTemplate plainJdbc;
 
     public GmailDataStore(NamedParameterJdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
+        this.plainJdbc = jdbcTemplate.getJdbcTemplate();
     }
 
     // ─── app_user ────────────────────────────────────────────────────────────
 
-    public void ensureUser(String userId, String emailAddress, String displayName) {
-        Integer count = jdbcTemplate.queryForObject(
-                "select count(*) from app_user where id = :userId",
-                Map.of("userId", userId), Integer.class);
-        if (count != null && count > 0) {
-            jdbcTemplate.update(
-                    "update app_user set email_address = :emailAddress, updated_at = :now where id = :userId",
-                    Map.of("userId", userId, "emailAddress", emailAddress, "now", Instant.now()));
-        } else {
-            Instant now = Instant.now();
-            jdbcTemplate.update(
-                    "insert into app_user (id, email_address, display_name, created_at, updated_at) values (:userId, :emailAddress, :displayName, :now, :now)",
-                    Map.of("userId", userId, "emailAddress", emailAddress,
-                            "displayName", displayName == null ? "" : displayName, "now", now));
+        public String ensureUser(String userId, String emailAddress, String displayName) {
+        try {
+            Integer count = plainJdbc.queryForObject(
+                    "select count(*) from app_user where id = ?", Integer.class, userId);
+            Timestamp now = Timestamp.from(Instant.now());
+            if (count != null && count > 0) {
+                plainJdbc.update(
+                        "update app_user set email_address = ?, updated_at = ? where id = ?",
+                        emailAddress, now, userId);
+                                return userId;
+                        }
+                    String existingUserIdByEmail = plainJdbc.query(
+                            "select id from app_user where email_address = ?",
+                            rs -> rs.next() ? rs.getString("id") : null,
+                            emailAddress);
+                    if (existingUserIdByEmail != null) {
+                                plainJdbc.update(
+                                                "update app_user set updated_at = ? where id = ?",
+                                                now, existingUserIdByEmail);
+                                return existingUserIdByEmail;
+            }
+                    Integer inserted = plainJdbc.update(
+                            "insert into app_user (id, email_address, display_name, created_at, updated_at) values (?, ?, ?, ?, ?) on conflict do nothing",
+                            userId, emailAddress, displayName == null ? "" : displayName, now, now);
+                    if (inserted != null && inserted > 0) {
+                        return userId;
+                    }
+                    String fallbackUserId = plainJdbc.query(
+                            "select id from app_user where id = ? or email_address = ? order by case when id = ? then 0 else 1 end limit 1",
+                            rs -> rs.next() ? rs.getString("id") : null,
+                            userId, emailAddress, userId);
+                    if (fallbackUserId != null) {
+                        return fallbackUserId;
+                    }
+                    return userId;
+        } catch (Exception ex) {
+            System.err.println("[GmailDataStore.ensureUser] FAILED userId=" + userId + " error=" + ex.getMessage());
+            throw ex;
         }
     }
 
@@ -53,39 +81,21 @@ public class GmailDataStore {
 
     public void saveConnection(String userId, String emailAddress, String encryptedRefreshToken,
             String accessToken, Instant accessTokenExpiresAt, String lastHistoryId) {
-        Integer count = jdbcTemplate.queryForObject(
-                "select count(*) from gmail_connection where user_id = :userId",
-                Map.of("userId", userId), Integer.class);
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("userId", userId);
-        p.put("emailAddress", emailAddress);
-        p.put("encryptedRefreshToken", encryptedRefreshToken);
-        p.put("accessToken", accessToken);
-        p.put("accessTokenExpiresAt", accessTokenExpiresAt);
-        p.put("lastHistoryId", lastHistoryId);
-        p.put("now", Instant.now());
+        Integer count = plainJdbc.queryForObject(
+                "select count(*) from gmail_connection where user_id = ?", Integer.class, userId);
+        Timestamp now = Timestamp.from(Instant.now());
+        Timestamp expiresAt = accessTokenExpiresAt != null ? Timestamp.from(accessTokenExpiresAt) : null;
         if (count != null && count > 0) {
-            jdbcTemplate.update("""
-                    update gmail_connection set
-                        email_address = :emailAddress,
-                        encrypted_refresh_token = :encryptedRefreshToken,
-                        access_token = :accessToken,
-                        access_token_expires_at = :accessTokenExpiresAt,
-                        last_history_id = :lastHistoryId,
-                        updated_at = :now
-                    where user_id = :userId
-                    """, p);
+            plainJdbc.update(
+                    "update gmail_connection set email_address=?, encrypted_refresh_token=?, access_token=?, access_token_expires_at=?, last_history_id=?, updated_at=? where user_id=?",
+                    emailAddress, encryptedRefreshToken, accessToken, expiresAt, lastHistoryId, now, userId);
         } else {
-            jdbcTemplate.update("""
-                    insert into gmail_connection
-                        (user_id, email_address, encrypted_refresh_token, access_token,
-                         access_token_expires_at, last_history_id, created_at, updated_at)
-                    values
-                        (:userId, :emailAddress, :encryptedRefreshToken, :accessToken,
-                         :accessTokenExpiresAt, :lastHistoryId, :now, :now)
-                    """, p);
+            plainJdbc.update(
+                    "insert into gmail_connection (user_id, email_address, encrypted_refresh_token, access_token, access_token_expires_at, last_history_id, created_at, updated_at) values (?,?,?,?,?,?,?,?)",
+                    userId, emailAddress, encryptedRefreshToken, accessToken, expiresAt, lastHistoryId, now, now);
         }
     }
+
 
     public Optional<GmailConnectionRecord> findConnection(String userId) {
         List<GmailConnectionRecord> results = jdbcTemplate.query("""
@@ -107,8 +117,12 @@ public class GmailDataStore {
         Integer count = jdbcTemplate.queryForObject(
                 "select count(*) from sync_cursor where user_id = :userId",
                 Map.of("userId", userId), Integer.class);
-        Map<String, Object> p = Map.of("userId", userId, "lastHistoryId", lastHistoryId,
-                "lastSyncedAt", lastSyncedAt, "syncMode", syncMode, "now", Instant.now());
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("userId", userId);
+        p.put("lastHistoryId", lastHistoryId);
+        p.put("lastSyncedAt", lastSyncedAt != null ? Timestamp.from(lastSyncedAt) : null);
+        p.put("syncMode", syncMode);
+        p.put("now", Timestamp.from(Instant.now()));
         if (count != null && count > 0) {
             jdbcTemplate.update("""
                     update sync_cursor set last_history_id = :lastHistoryId,
@@ -149,8 +163,8 @@ public class GmailDataStore {
         p.put("category", category);
         p.put("summary", summary);
         p.put("messageCount", thread.messages().size());
-        p.put("lastMessageAt", thread.updatedAt());
-        p.put("now", Instant.now());
+        p.put("lastMessageAt", thread.updatedAt() != null ? Timestamp.from(thread.updatedAt()) : null);
+        p.put("now", Timestamp.from(Instant.now()));
         if (count != null && count > 0) {
             jdbcTemplate.update("""
                     update email_thread set history_id = :historyId, subject = :subject,
@@ -189,14 +203,14 @@ public class GmailDataStore {
         p.put("toAddressesJson", message.toAddresses());
         p.put("ccAddressesJson", message.ccAddresses());
         p.put("subject", message.subject());
-        p.put("sentAt", message.sentAt());
+        p.put("sentAt", message.sentAt() != null ? Timestamp.from(message.sentAt()) : null);
         p.put("bodyText", message.bodyText());
         p.put("bodyHtml", message.bodyHtml());
         p.put("snippet", snippet);
         p.put("summary", summary);
         p.put("category", category);
         p.put("rawInternalDate", message.internalDateEpochMillis());
-        p.put("now", Instant.now());
+        p.put("now", Timestamp.from(Instant.now()));
         if (count != null && count > 0) {
             jdbcTemplate.update("""
                     update email_message set thread_id=:threadId, message_id_header=:messageIdHeader,
@@ -231,10 +245,16 @@ public class GmailDataStore {
         Integer count = jdbcTemplate.queryForObject(
                 "select count(*) from email_embedding where user_id = :userId and source_type = :sourceType and source_id = :sourceId",
                 Map.of("userId", userId, "sourceType", sourceType, "sourceId", sourceId), Integer.class);
-        Map<String, Object> p = Map.of("userId", userId, "sourceType", sourceType,
-                "sourceId", sourceId, "threadId", threadId, "content", content,
-                "embedding", toVectorLiteral(embedding), "sender", sender,
-                "sentAt", sentAt, "now", Instant.now());
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("userId", userId);
+        p.put("sourceType", sourceType);
+        p.put("sourceId", sourceId);
+        p.put("threadId", threadId);
+        p.put("content", content);
+        p.put("embedding", toVectorLiteral(embedding));
+        p.put("sender", sender);
+        p.put("sentAt", sentAt != null ? Timestamp.from(sentAt) : null);
+        p.put("now", Timestamp.from(Instant.now()));
         if (count != null && count > 0) {
             jdbcTemplate.update("""
                     update email_embedding set thread_id=:threadId, content=:content,
@@ -271,7 +291,7 @@ public class GmailDataStore {
         p.put("toAddress", toAddress);
         p.put("inReplyTo", inReplyTo);
         p.put("references", references);
-        p.put("now", Instant.now());
+        p.put("now", Timestamp.from(Instant.now()));
         if (count != null && count > 0) {
             jdbcTemplate.update(
                     "update draft_email set body=:body, updated_at=:now where id=:id", p);
@@ -288,6 +308,88 @@ public class GmailDataStore {
     }
 
     // ─── Read methods ─────────────────────────────────────────────────────────
+
+    /**
+     * Structured inbox search: filters by date range, optional category, optional
+     * sender substring, and a list of keywords matched against subject + body_text.
+     *
+     * Returns up to {@code limit} messages ordered by recency (newest first).
+     * At least one keyword must match (using PostgreSQL ILIKE across subject and body).
+     *
+     * All parameters except userId and limit are optional — pass null to skip a filter.
+     */
+    public List<InboxSearchHit> searchInbox(
+            String userId,
+            java.time.Instant fromDate,
+            java.time.Instant toDate,
+            String category,
+            String senderFilter,
+            List<String> keywords,
+            int limit) {
+
+        StringBuilder sql = new StringBuilder("""
+                select message_id, thread_id, from_address, subject,
+                       sent_at, snippet, body_text, category
+                from email_message
+                where user_id = :userId
+                """);
+
+        Map<String, Object> params = new java.util.LinkedHashMap<>();
+        params.put("userId", userId);
+
+        // ── date range ──────────────────────────────────────────────────────
+        if (fromDate != null) {
+            sql.append("  and sent_at >= :fromDate\n");
+            params.put("fromDate", Timestamp.from(fromDate));
+        }
+        if (toDate != null) {
+            sql.append("  and sent_at <= :toDate\n");
+            params.put("toDate", Timestamp.from(toDate));
+        }
+
+        // ── category filter ─────────────────────────────────────────────────
+        if (category != null && !category.isBlank()) {
+            sql.append("  and upper(category) like :category\n");
+            params.put("category", "%" + category.toUpperCase() + "%");
+        }
+
+        // ── sender / company filter ─────────────────────────────────────────
+        if (senderFilter != null && !senderFilter.isBlank()) {
+            sql.append("  and lower(from_address) like :sender\n");
+            params.put("sender", "%" + senderFilter.toLowerCase() + "%");
+        }
+
+        // ── keyword filter — subject OR body must match at least one keyword ─
+        if (keywords != null && !keywords.isEmpty()) {
+            sql.append("  and (\n");
+            List<String> clauses = new java.util.ArrayList<>();
+            for (int i = 0; i < keywords.size(); i++) {
+                String key = "kw" + i;
+                String pattern = "%" + keywords.get(i).toLowerCase() + "%";
+                clauses.add("    lower(subject) like :" + key
+                          + " or lower(coalesce(body_text,'')) like :" + key);
+                params.put(key, pattern);
+            }
+            sql.append(String.join("\n    or\n", clauses));
+            sql.append("\n  )\n");
+        }
+
+        sql.append("order by sent_at desc nulls last\n");
+        sql.append("limit :limit");
+        params.put("limit", limit);
+
+        return jdbcTemplate.query(sql.toString(), params,
+                (rs, n) -> new InboxSearchHit(
+                        rs.getString("message_id"),
+                        rs.getString("thread_id"),
+                        rs.getString("from_address"),
+                        rs.getString("subject"),
+                        rs.getTimestamp("sent_at") == null ? null
+                                : rs.getTimestamp("sent_at").toInstant(),
+                        rs.getString("snippet"),
+                        rs.getString("body_text"),
+                        rs.getString("category")));
+    }
 
     public List<RetrievalHit> searchRelevantContent(String userId, List<Double> embedding, int limit) {
         return jdbcTemplate.query("""
@@ -386,11 +488,15 @@ public class GmailDataStore {
     }
 
     public void markDraftSent(String userId, String draftId, String gmailMessageId) {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("userId", userId);
+        p.put("draftId", draftId);
+        p.put("gmailMessageId", gmailMessageId);
+        p.put("now", Timestamp.from(Instant.now()));
         jdbcTemplate.update("""
                 update draft_email set status='sent', gmail_message_id=:gmailMessageId, updated_at=:now
                 where user_id=:userId and id=:draftId
-                """, Map.of("userId", userId, "draftId", draftId,
-                "gmailMessageId", gmailMessageId, "now", Instant.now()));
+                """, p);
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -435,4 +541,14 @@ public class GmailDataStore {
 
     public record DraftRecord(String id, String userId, String gmailThreadId, String mode,
             String subject, String body, String toAddress, String inReplyTo, String references) {}
+
+    public record InboxSearchHit(
+            String messageId,
+            String threadId,
+            String fromAddress,
+            String subject,
+            Instant sentAt,
+            String snippet,
+            String bodyText,
+            String category) {}
 }

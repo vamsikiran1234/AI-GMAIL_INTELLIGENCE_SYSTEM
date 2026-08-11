@@ -101,6 +101,8 @@ export default function App() {
     document.getElementById('assistant-panel')?.scrollIntoView({ behavior: 'smooth' });
   }
 
+  const syncLoadingLabel = isSyncing ? 'Syncing inbox…' : 'Run Sync';
+
   return (
     <div className="min-h-screen text-white">
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-6 lg:px-8">
@@ -130,9 +132,29 @@ export default function App() {
                 </label>
                 <div className="flex flex-wrap gap-3">
                   <button onClick={handleConnect} className="rounded-2xl bg-gold-500 px-4 py-3 text-sm font-semibold text-ink-950 transition hover:bg-gold-400">Connect Gmail</button>
-                  <button onClick={handleSync} disabled={isSyncing} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50">{isSyncing ? 'Syncing…' : 'Run Sync'}</button>
+                  <button onClick={handleSync} disabled={isSyncing}
+                    aria-busy={isSyncing}
+                    className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60">
+                    {isSyncing && (
+                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border-2 border-white/25 border-t-white animate-spin" aria-hidden="true" />
+                    )}
+                    {syncLoadingLabel}
+                  </button>
                 </div>
               </div>
+              {isSyncing && (
+                <div className="mt-5 rounded-3xl border border-gold-500/20 bg-gold-500/5 px-4 py-4">
+                  <div className="flex items-center gap-3">
+                    <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-gold-500/15 text-gold-400">
+                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border-2 border-gold-400/30 border-t-gold-400 animate-spin" aria-hidden="true" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold text-white">Sync in progress</p>
+                      <p className="mt-1 text-sm text-mist-200">Your Gmail inbox is being refreshed. This can take a moment while threads, summaries, and citations are prepared.</p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="glass-card rounded-[28px] p-6">

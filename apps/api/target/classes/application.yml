@@ -1,5 +1,10 @@
 server:
   port: ${SERVER_PORT:8080}
+  servlet:
+    # Allow sync requests up to 2 minutes before Tomcat closes the connection
+    async-supported: true
+  tomcat:
+    connection-timeout: 120000
 
 spring:
   datasource:

@@ -80,8 +80,21 @@ public class GmailApiClient {
                 .block(), "Google OAuth refresh");
     }
 
+    /**
+     * Returns true when the exception signals an expired / revoked OAuth token.
+     */
+    public static boolean isAuthError(Exception ex) {
+        if (ex instanceof GmailApiException gae) {
+            return gae.isUnauthorized();
+        }
+        String msg = ex.getMessage();
+        if (msg == null) return false;
+        return msg.contains("401") || msg.contains("UNAUTHENTICATED")
+                || msg.contains("Invalid Credentials") || msg.contains("authError");
+    }
+
     public GmailThreadSnapshot fetchThread(String accessToken, String threadId) {
-        JsonNode response = rateLimitExecutor.execute(() -> gmailWebClient.get()
+        String responseBody = rateLimitExecutor.execute(() -> gmailWebClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/users/me/threads/{threadId}")
                         .queryParam("format", "full")
                         .queryParam("metadataHeaders", "Message-ID")
@@ -90,9 +103,62 @@ public class GmailApiClient {
                         .build(threadId))
                 .headers(headers -> headers.setBearerAuth(accessToken))
                 .retrieve()
-                .bodyToMono(JsonNode.class)
-                .block(), "Gmail fetch thread");
-        return parseThread(response);
+                .bodyToMono(String.class)
+                .block(), "Gmail fetch thread", 1);
+        if (responseBody == null || responseBody.isBlank()) {
+            throw new IllegalStateException("Empty Gmail fetch thread response for thread " + threadId);
+        }
+        try {
+            JsonNode response = objectMapper.readTree(responseBody);
+            // Surface a clear auth error so the sync layer can refresh and retry
+            JsonNode errorCode = response.path("error").path("code");
+            if (!errorCode.isMissingNode() && errorCode.asInt() == 401) {
+                throw new GmailApiException("401 UNAUTHENTICATED - Gmail fetch thread " + threadId
+                        + ": " + response.path("error").path("message").asText(), null, 401);
+            }
+            if (!errorCode.isMissingNode() && errorCode.asInt() == 404) {
+                throw new GmailApiException("404 NOT_FOUND - Gmail fetch thread " + threadId, null, 404);
+            }
+            return parseThread(response);
+        } catch (GmailApiException ex) {
+            throw ex;
+        } catch (IllegalStateException ex) {
+            throw ex;
+        } catch (Exception exception) {
+            String preview = responseBody.length() > 200 ? responseBody.substring(0, 200) + "..." : responseBody;
+            throw new IllegalStateException("Gmail fetch thread returned non-JSON for thread " + threadId + ": " + preview, exception);
+        }
+    }
+
+    public GmailThreadSnapshot fetchThreadOrFallback(String accessToken, JsonNode threadNode) {
+        String threadId = threadNode.path("id").asText();
+        try {
+            return fetchThread(accessToken, threadId);
+        } catch (GmailApiException gae) {
+            if (gae.isNotFound()) {
+                System.err.println("[GmailApiClient] Thread " + threadId + " not found (deleted/trashed) — skipping");
+                return buildFallbackThreadSnapshot(threadNode);
+            }
+            throw gae;
+        } catch (Exception exception) {
+            System.err.println("[GmailApiClient.fetchThreadOrFallback] Using fallback for thread " + threadId + ": " + exception.getMessage());
+            return buildFallbackThreadSnapshot(threadNode);
+        }
+    }
+
+    public GmailThreadSnapshot fetchThreadOrFallback(String accessToken, String threadId) {
+        try {
+            return fetchThread(accessToken, threadId);
+        } catch (GmailApiException gae) {
+            if (gae.isNotFound()) {
+                System.err.println("[GmailApiClient] Thread " + threadId + " not found (deleted/trashed) — skipping");
+                return buildFallbackThreadSnapshot(threadId, threadId, "[]");
+            }
+            throw gae;
+        } catch (Exception exception) {
+            System.err.println("[GmailApiClient.fetchThreadOrFallback] Using fallback for thread " + threadId + ": " + exception.getMessage());
+            return buildFallbackThreadSnapshot(threadId, threadId, "[]");
+        }
     }
 
     public ThreadPage listThreadsPage(String accessToken, String pageToken, int pageSize) {
@@ -111,11 +177,20 @@ public class GmailApiClient {
                 .bodyToMono(JsonNode.class)
                 .block(), "Gmail list threads");
 
+        // Surface auth errors clearly so the caller can refresh and retry
+        if (response != null && !response.path("error").isMissingNode()) {
+            int code = response.path("error").path("code").asInt(0);
+            String msg = response.path("error").path("message").asText("");
+            if (code == 401) {
+                throw new IllegalStateException("401 UNAUTHENTICATED - Gmail list threads: " + msg);
+            }
+        }
+
         List<GmailThreadSnapshot> snapshots = new ArrayList<>();
         JsonNode threads = response.path("threads");
         if (threads.isArray()) {
             for (JsonNode threadNode : threads) {
-                snapshots.add(fetchThread(accessToken, threadNode.path("id").asText()));
+                snapshots.add(fetchThreadOrFallback(accessToken, threadNode));
             }
         }
         return new ThreadPage(snapshots, response.path("nextPageToken").asText(""));
@@ -134,6 +209,15 @@ public class GmailApiClient {
                 .retrieve()
                 .bodyToMono(JsonNode.class)
                 .block(), "Gmail history list");
+
+        // Surface auth errors so the caller can refresh and retry
+        if (response != null && !response.path("error").isMissingNode()) {
+            int code = response.path("error").path("code").asInt(0);
+            String msg = response.path("error").path("message").asText("");
+            if (code == 401) {
+                throw new IllegalStateException("401 UNAUTHENTICATED - Gmail history list: " + msg);
+            }
+        }
 
         List<String> threadIds = new ArrayList<>();
         JsonNode histories = response.path("history");
@@ -205,6 +289,23 @@ public class GmailApiClient {
                         ? threadNode.path("messages").path(threadNode.path("messages").size() - 1).path("internalDate").asLong()
                         : System.currentTimeMillis()),
                 messages);
+    }
+
+    private GmailThreadSnapshot buildFallbackThreadSnapshot(JsonNode threadNode) {
+        return buildFallbackThreadSnapshot(
+                threadNode.path("id").asText(),
+                threadNode.path("snippet").asText(threadNode.path("id").asText()),
+                threadNode.path("labelIds").isArray() ? threadNode.path("labelIds").toString() : "[]");
+    }
+
+    private GmailThreadSnapshot buildFallbackThreadSnapshot(String threadId, String subject, String labelIds) {
+        return new GmailThreadSnapshot(
+                threadId,
+                "",
+                subject == null || subject.isBlank() ? threadId : subject,
+                labelIds == null || labelIds.isBlank() ? "[]" : labelIds,
+                Instant.now(),
+                List.of());
     }
 
     private GmailMessageSnapshot parseMessage(JsonNode messageNode, String threadId) {
