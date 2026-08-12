@@ -32,13 +32,9 @@ public class AiOrchestratorService {
     public String generateWithFallback(String systemPrompt, String userPrompt) {
         try {
             return generateWithGemini(systemPrompt, userPrompt);
-        } catch (Exception exception) {
-            try {
-                return generateWithNim(systemPrompt, userPrompt);
-            } catch (Exception nimException) {
-                System.err.println("[AiOrchestratorService] Falling back to local response: " + nimException.getMessage());
-                return localFallback(systemPrompt, userPrompt);
-            }
+        } catch (Exception geminiException) {
+            System.err.println("[AiOrchestratorService] Gemini failed, using local fallback: " + geminiException.getMessage());
+            return localFallback(systemPrompt, userPrompt);
         }
     }
 
