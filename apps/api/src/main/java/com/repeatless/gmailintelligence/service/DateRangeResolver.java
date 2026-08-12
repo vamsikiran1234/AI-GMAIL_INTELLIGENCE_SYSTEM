@@ -41,8 +41,8 @@ public class DateRangeResolver {
 
     private static final ZoneId ZONE = ZoneId.systemDefault();
 
-    /** Default window used when no date expression is present. */
-    private static final int DEFAULT_DAYS = 30;
+    /** Default window used when no date expression is recognised. */
+    private static final int DEFAULT_DAYS = 7;
 
     /** Window used for "latest / recent / newest". */
     private static final int LATEST_DAYS = 3;

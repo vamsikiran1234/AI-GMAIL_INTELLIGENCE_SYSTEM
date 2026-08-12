@@ -317,6 +317,10 @@ public class GmailDataStore {
      * At least one keyword must match (using PostgreSQL ILIKE across subject and body).
      *
      * All parameters except userId and limit are optional — pass null to skip a filter.
+     *
+     * When a date range is active, rows with NULL sent_at are explicitly excluded
+     * because PostgreSQL evaluates (NULL >= timestamp) as UNKNOWN, which means those
+     * rows would silently pass a WHERE clause and appear as undated ghost results.
      */
     public List<InboxSearchHit> searchInbox(
             String userId,
@@ -338,6 +342,11 @@ public class GmailDataStore {
         params.put("userId", userId);
 
         // ── date range ──────────────────────────────────────────────────────
+        if (fromDate != null || toDate != null) {
+            // Exclude rows with no date when a date filter is active — NULL sent_at
+            // would otherwise pass a (sent_at >= X) predicate in PostgreSQL.
+            sql.append("  and sent_at is not null\n");
+        }
         if (fromDate != null) {
             sql.append("  and sent_at >= :fromDate\n");
             params.put("fromDate", Timestamp.from(fromDate));

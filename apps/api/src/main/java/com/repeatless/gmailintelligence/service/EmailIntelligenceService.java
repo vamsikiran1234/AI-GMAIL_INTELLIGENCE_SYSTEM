@@ -41,13 +41,15 @@ public class EmailIntelligenceService {
     private final InboxQueryParser inboxQueryParser;
     private final DateRangeResolver dateRangeResolver;
     private final InboxRelevanceRanker inboxRelevanceRanker;
+    private final EmailContentCleaner contentCleaner;
 
     public EmailIntelligenceService(GmailOAuthService gmailOAuthService, GmailApiClient gmailApiClient,
             GmailDataStore gmailDataStore, AiOrchestratorService aiOrchestratorService,
             ConversationRepository conversationRepository,
             InboxQueryParser inboxQueryParser,
             DateRangeResolver dateRangeResolver,
-            InboxRelevanceRanker inboxRelevanceRanker) {
+            InboxRelevanceRanker inboxRelevanceRanker,
+            EmailContentCleaner contentCleaner) {
         this.gmailOAuthService = gmailOAuthService;
         this.gmailApiClient = gmailApiClient;
         this.gmailDataStore = gmailDataStore;
@@ -56,6 +58,7 @@ public class EmailIntelligenceService {
         this.inboxQueryParser = inboxQueryParser;
         this.dateRangeResolver = dateRangeResolver;
         this.inboxRelevanceRanker = inboxRelevanceRanker;
+        this.contentCleaner = contentCleaner;
     }
 
     public ThreadListResponse listThreads(String userId, int page, int pageSize) {
@@ -249,17 +252,16 @@ public class EmailIntelligenceService {
     }
 
     public ChatResponse answerQuestion(ChatRequest request) {
-        // ── 1. Parse intent, date, keywords from natural language ─────────────
+        // ── 1. Parse intent, date, keywords ───────────────────────────────────
         InboxQueryParser.InboxQuery query = inboxQueryParser.parse(request.message());
 
-        // ── 2. Resolve date range (null token → last 30 days default) ─────────
+        // ── 2. Resolve date range ──────────────────────────────────────────────
         DateRangeResolver.DateRange dateRange = dateRangeResolver.resolve(query.dateToken());
 
-        // ── 3. Map intent to DB category filter ───────────────────────────────
+        // ── 3. Category filter ─────────────────────────────────────────────────
         String categoryFilter = intentToCategoryFilter(query.intent());
 
-        // ── 4. Structured inbox search ─────────────────────────────────────────
-        // Fetch up to 40 raw candidates; ranker will trim to the best 15.
+        // ── 4. Structured inbox search (broad recall, ranker does precision) ───
         List<GmailDataStore.InboxSearchHit> rawHits = gmailDataStore.searchInbox(
                 request.userId(),
                 dateRange.from(),
@@ -269,14 +271,11 @@ public class EmailIntelligenceService {
                 query.keywords(),
                 40);
 
-        // ── 5. Rank + filter by relevance ──────────────────────────────────────
+        // ── 5. Relevance filter + rank ─────────────────────────────────────────
         List<InboxRelevanceRanker.RankedHit> ranked =
                 inboxRelevanceRanker.rank(rawHits, query, 15);
 
-        // ── 6. Build evidence bundle from ranked hits ──────────────────────────
-        String evidence = buildInboxEvidenceBundle(ranked, dateRange, query);
-
-        // ── 7. Persist conversation ────────────────────────────────────────────
+        // ── 6. Persist conversation (user message) ─────────────────────────────
         String conversationId = request.conversationId();
         if (conversationId == null || conversationId.isBlank()) {
             conversationId = conversationRepository.createConversation(
@@ -284,103 +283,117 @@ public class EmailIntelligenceService {
         }
         conversationRepository.saveMessage(conversationId, "user", request.message(), "[]");
 
-        // ── 8. Generate answer ─────────────────────────────────────────────────
-        String answer = aiOrchestratorService.answerFromInboxSearch(
-                request.message(), evidence, ranked.size(), dateRange.label());
+        // ── 7. If structured search returned nothing, fall back to semantic RAG ─
+        // Do this BEFORE saving an assistant message so we don't double-save.
+        if (ranked.isEmpty()) {
+            return fallbackSemanticAnswer(request, conversationId);
+        }
 
-        // ── 9. Build citations from ranked hits ────────────────────────────────
+        // ── 8. Build clean evidence bundle ─────────────────────────────────────
+        String evidence = buildInboxEvidenceBundle(ranked, dateRange, query);
+
+        // ── 9. Generate intent-aware answer ───────────────────────────────────
+        String answer = aiOrchestratorService.answerFromInboxSearch(
+                request.message(), evidence, ranked.size(), dateRange.label(), query.intent());
+
+        // ── 10. Build citations with clean snippets ────────────────────────────
         List<SourceCitation> citations = ranked.stream()
                 .map(rh -> new SourceCitation(
                         "message",
                         rh.hit().messageId(),
                         rh.hit().fromAddress(),
                         rh.hit().sentAt(),
-                        truncate(rh.hit().snippet() != null
+                        sanitizeSnippet(rh.hit().snippet() != null && !rh.hit().snippet().isBlank()
                                 ? rh.hit().snippet()
                                 : rh.hit().subject())))
                 .toList();
 
-        String citationsJson = buildCitationsJson(citations);
-        conversationRepository.saveMessage(conversationId, "assistant", answer, citationsJson);
-
-        // ── 10. If structured search returned nothing, fall back to semantic RAG ─
-        if (ranked.isEmpty()) {
-            return fallbackSemanticAnswer(request, conversationId, answer);
-        }
+        // ── 11. Persist assistant message ─────────────────────────────────────
+        conversationRepository.saveMessage(conversationId, "assistant", answer, buildCitationsJson(citations));
 
         return new ChatResponse(conversationId, answer, citations);
     }
 
     /**
      * Semantic RAG fallback — used when the structured inbox search returns no results.
-     * Embeds the question and searches pgvector, then generates an answer from
-     * whatever evidence exists. This handles open-ended questions that aren't
-     * inbox-search requests (e.g. "What was agreed in the project meeting?").
+     * Handles open-ended questions not suited to keyword/date search
+     * (e.g. "What was agreed in the project meeting?").
+     * Saves exactly ONE assistant message.
      */
-    private ChatResponse fallbackSemanticAnswer(ChatRequest request, String conversationId,
-            String noResultsAnswer) {
+    private ChatResponse fallbackSemanticAnswer(ChatRequest request, String conversationId) {
         try {
             List<Double> embedding = aiOrchestratorService.embed(request.message());
             List<com.repeatless.gmailintelligence.model.GmailModels.RetrievalHit> hits =
                     gmailDataStore.searchRelevantContent(request.userId(), embedding, 6);
 
+            String answer;
+            String citationsJson;
+            List<SourceCitation> citations;
+
             if (hits.isEmpty()) {
-                // Nothing in semantic index either — return the no-results message
-                return new ChatResponse(conversationId, noResultsAnswer, List.of());
+                answer = "I couldn't find any matching emails in your inbox for that request. "
+                       + "Try syncing your inbox first, or rephrase your question.";
+                citationsJson = "[]";
+                citations = List.of();
+            } else {
+                String evidence = buildEvidenceBundle(hits);
+                answer = aiOrchestratorService.answerQuestion(request.message(), evidence);
+                citationsJson = citationsJson(hits);
+                citations = toSourceCitations(hits);
             }
 
-            String evidence = buildEvidenceBundle(hits);
-            String answer   = aiOrchestratorService.answerQuestion(request.message(), evidence);
-
-            String citationsJson = citationsJson(hits);
             conversationRepository.saveMessage(conversationId, "assistant", answer, citationsJson);
+            return new ChatResponse(conversationId, answer, citations);
 
-            return new ChatResponse(conversationId, answer, toSourceCitations(hits));
         } catch (Exception e) {
-            return new ChatResponse(conversationId, noResultsAnswer, List.of());
+            String fallback = "I couldn't find any relevant emails. Please try syncing your inbox.";
+            conversationRepository.saveMessage(conversationId, "assistant", fallback, "[]");
+            return new ChatResponse(conversationId, fallback, List.of());
         }
     }
 
     // ─── evidence builders ────────────────────────────────────────────────────
 
     /**
-     * Formats ranked inbox hits into a structured text bundle for the AI.
-     * Includes date range context and email count so the model can say
-     * "I found N emails from [range]" rather than "no evidence provided".
+     * Formats ranked inbox hits into a clean evidence bundle for the AI.
+     *
+     * Format: one email per block, clearly labelled, with clean plain-text body.
+     * The "Search context" debug header is intentionally omitted from the per-email
+     * blocks — context is passed separately via the userPrompt in the AI call.
      */
     private String buildInboxEvidenceBundle(
             List<InboxRelevanceRanker.RankedHit> ranked,
             DateRangeResolver.DateRange dateRange,
             InboxQueryParser.InboxQuery query) {
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("Search context:\n");
-        sb.append("  Date range: ").append(dateRange.label()).append("\n");
-        sb.append("  Intent: ").append(query.intent()).append("\n");
-        sb.append("  Results found: ").append(ranked.size()).append("\n\n");
-
         if (ranked.isEmpty()) {
-            sb.append("No matching emails found in the inbox for this search.\n");
-            return sb.toString();
+            return "No matching emails found for the requested date range ("
+                    + dateRange.label() + ").";
         }
 
         java.time.format.DateTimeFormatter fmt =
             java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")
                 .withZone(java.time.ZoneId.systemDefault());
 
+        StringBuilder sb = new StringBuilder();
         for (int i = 0; i < ranked.size(); i++) {
             GmailDataStore.InboxSearchHit hit = ranked.get(i).hit();
-            sb.append("--- Email ").append(i + 1).append(" ---\n");
-            sb.append("From:    ").append(nullSafe(hit.fromAddress())).append("\n");
-            sb.append("Date:    ").append(hit.sentAt() != null ? fmt.format(hit.sentAt()) : "unknown").append("\n");
+
+            sb.append("[").append(i + 1).append("] ");
             sb.append("Subject: ").append(nullSafe(hit.subject())).append("\n");
-            sb.append("Category:").append(nullSafe(hit.category())).append("\n");
-            // Include the first 400 chars of body so the AI has real content
-            String body = hit.bodyText() != null && !hit.bodyText().isBlank()
-                    ? hit.bodyText() : hit.snippet();
-            if (body != null && !body.isBlank()) {
-                sb.append("Content: ").append(body.length() > 400
-                        ? body.substring(0, 400) + "…" : body).append("\n");
+            sb.append("    From:    ").append(nullSafe(hit.fromAddress())).append("\n");
+            sb.append("    Date:    ").append(
+                    hit.sentAt() != null ? fmt.format(hit.sentAt()) : "unknown").append("\n");
+            sb.append("    Type:    ").append(ranked.get(i).subtype().name()).append("\n");
+
+            // Clean body — already processed by EmailContentCleaner at ingest time,
+            // but toSnippet() provides a compact 500-char version for the prompt.
+            String cleanBody = contentCleaner.toSnippet(
+                    hit.bodyText() != null && !hit.bodyText().isBlank()
+                            ? hit.bodyText() : hit.snippet(),
+                    500);
+            if (!cleanBody.isBlank()) {
+                sb.append("    Content: ").append(cleanBody).append("\n");
             }
             sb.append("\n");
         }
@@ -652,16 +665,12 @@ public class EmailIntelligenceService {
     }
 
     /**
-     * Strips HTML tags and collapses whitespace from an email snippet/body
-     * so it is safe and readable as a citation snippet.
+     * Produces a short, clean snippet for JSON/citation use.
+     * Delegates to EmailContentCleaner which handles HTML stripping,
+     * entity decoding, and whitespace normalisation.
      */
     private String sanitizeSnippet(String raw) {
-        if (raw == null || raw.isBlank()) return "";
-        // Strip HTML tags
-        String plain = raw.replaceAll("<[^>]*>", " ");
-        // Collapse all whitespace (including \r, \n, \t) into single spaces
-        plain = plain.replaceAll("[\\s\\r\\n\\t]+", " ").strip();
-        return plain.length() <= 240 ? plain : plain.substring(0, 240);
+        return contentCleaner.toSnippet(raw, 240);
     }
 
     private record NewsletterCandidate(String title, String summary, String source, String threadId) {

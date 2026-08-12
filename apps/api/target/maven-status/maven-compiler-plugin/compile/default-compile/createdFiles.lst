@@ -12,6 +12,7 @@ com\repeatless\gmailintelligence\service\EmailIntelligenceService.class
 com\repeatless\gmailintelligence\service\InboxQueryParser.class
 com\repeatless\gmailintelligence\controller\SyncController.class
 com\repeatless\gmailintelligence\controller\HealthController.class
+com\repeatless\gmailintelligence\service\EmailContentCleaner.class
 com\repeatless\gmailintelligence\config\WebClientConfig.class
 com\repeatless\gmailintelligence\model\GmailModels$GmailMessageSnapshot.class
 com\repeatless\gmailintelligence\dto\ApiDtos$DraftRequest.class
@@ -26,6 +27,7 @@ com\repeatless\gmailintelligence\service\GmailDataStore$InboxSearchHit.class
 com\repeatless\gmailintelligence\dto\ApiDtos$SendResponse.class
 com\repeatless\gmailintelligence\service\EmailIntelligenceService$NewsletterCluster.class
 com\repeatless\gmailintelligence\repository\ConversationRepository$ChatHistoryItem.class
+com\repeatless\gmailintelligence\service\AiOrchestratorService$1.class
 com\repeatless\gmailintelligence\controller\InternalSyncController.class
 com\repeatless\gmailintelligence\service\DateRangeResolver.class
 com\repeatless\gmailintelligence\dto\ApiDtos.class
@@ -59,6 +61,7 @@ com\repeatless\gmailintelligence\service\GmailDataStore.class
 com\repeatless\gmailintelligence\dto\ApiDtos$OAuthStartResponse.class
 com\repeatless\gmailintelligence\dto\ApiDtos$NewsletterDigestRequest.class
 com\repeatless\gmailintelligence\service\GmailDataStore$DraftRecord.class
+com\repeatless\gmailintelligence\service\InboxRelevanceRanker$EmailSubtype.class
 com\repeatless\gmailintelligence\config\CorsConfig.class
 com\repeatless\gmailintelligence\dto\ApiDtos$ThreadListResponse.class
 com\repeatless\gmailintelligence\model\GmailModels$RetrievalHit.class
