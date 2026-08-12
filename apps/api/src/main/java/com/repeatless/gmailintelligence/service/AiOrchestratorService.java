@@ -114,36 +114,65 @@ public class AiOrchestratorService {
     /**
      * Primary inbox-search answer method.
      *
-     * The model is told it has ALREADY searched the inbox and received real results,
-     * so it must never ask for evidence or say "no evidence provided".
-     * Zero results are reported naturally as "I couldn't find any matching emails."
+     * The model is told it has ALREADY searched the inbox and received real results.
+     * The prompt adapts based on the user's intent so job queries get a different
+     * format from finance queries, general queries, etc.
      */
     public String answerFromInboxSearch(String question, String evidenceBundle,
-            int resultCount, String dateRangeLabel) {
+            int resultCount, String dateRangeLabel, InboxQueryParser.Intent intent) {
+
+        // ── Intent-specific formatting instruction ─────────────────────────────
+        String formatInstruction = switch (intent) {
+            case JOB_SEARCH -> """
+                    For each email, provide:
+                    • Company / sender name
+                    • Role / job title (from subject or content)
+                    • Date received
+                    • Key details found in the email: location, experience required, salary if mentioned
+                    List results sorted by most recent first.
+                    """;
+            case FINANCE -> """
+                    For each email, provide:
+                    • Sender / institution
+                    • Transaction type or subject
+                    • Date
+                    • Amount or key financial detail if present
+                    List results sorted by most recent first.
+                    """;
+            case NEWSLETTER -> """
+                    Summarise the key topics and stories from the newsletters found.
+                    Group by newsletter source if multiple sources are present.
+                    """;
+            case WORK -> """
+                    For each email, provide:
+                    • Sender and subject
+                    • Date
+                    • Key action items or decisions mentioned
+                    """;
+            default -> """
+                    Summarise the emails clearly and concisely.
+                    List by most recent first.
+                    """;
+        };
+
         String systemPrompt = """
                 You are an intelligent email inbox assistant.
-                You have already searched the user's inbox and retrieved the emails listed below.
-                Your job is to analyse those emails and give a clear, helpful answer.
+                You have already searched the user's inbox. The emails below are the actual search results.
 
-                Rules:
-                - NEVER say "no email evidence provided" or ask the user to provide evidence.
-                - If the search returned 0 emails, say so naturally:
-                  "I couldn't find any matching emails from [date range]."
-                - If emails were found, summarise them clearly.
-                  For job/hiring requests list each result with:
-                    • Company / sender
-                    • Role / subject line
-                    • Date received
-                    • Key details (location, type, link if present in the email)
-                - Sort results by most recent first.
-                - Be concise but complete. Do not hallucinate any detail not present in the emails.
-                - If a detail is missing (e.g. location not mentioned), omit it — do not guess.
-                """;
+                Core rules:
+                1. NEVER say "no email evidence provided" or ask the user to provide evidence.
+                2. If the result count is 0, say naturally: "I couldn't find any matching emails from [date range]."
+                3. Do NOT expose internal framing like "Search context", "Evidence bundle", or email index numbers like [1], [2].
+                4. Do NOT hallucinate any detail not present in the emails below.
+                5. If a detail is missing (e.g. location not in the email), omit it — do not guess.
+                6. Be concise. The user wants a direct, readable answer — not a data dump.
+                """
+                + "\nResponse format for this request:\n" + formatInstruction;
 
-        String userPrompt = "User request: " + question + "\n\n"
+        String userPrompt = "User request: " + question + "\n"
                 + "Date range searched: " + dateRangeLabel + "\n"
-                + "Total emails retrieved: " + resultCount + "\n\n"
-                + "Inbox search results:\n" + evidenceBundle;
+                + "Emails found: " + resultCount + "\n\n"
+                + evidenceBundle;
 
         return generateWithFallback(systemPrompt, userPrompt);
     }
@@ -196,8 +225,10 @@ public class AiOrchestratorService {
         }
         // Inbox search local fallback — surface the raw evidence so the user still sees results
         if (prompt.contains("intelligent email inbox assistant")) {
-            String evidence = userPrompt.contains("Inbox search results:")
-                    ? userPrompt.substring(userPrompt.indexOf("Inbox search results:"))
+            // Find the evidence block (starts after the metadata lines)
+            int evidenceStart = userPrompt.indexOf("\n\n");
+            String evidence = evidenceStart >= 0
+                    ? userPrompt.substring(evidenceStart).strip()
                     : userPrompt;
             return "Here are the emails I found:\n\n" + shorten(evidence, 1200);
         }

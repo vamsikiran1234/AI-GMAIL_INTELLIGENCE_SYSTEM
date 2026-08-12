@@ -13,10 +13,19 @@ import org.springframework.stereotype.Component;
  *
  * Responsibilities:
  *  1. Detect the user's intent (job search, finance, newsletter, general, etc.)
- *  2. Extract raw keywords mentioned in the question
+ *  2. Extract raw keywords from the question
  *  3. Expand those keywords with role-synonyms and domain terms
+ *     - searchKeywords  : broad set used for the SQL ILIKE query (recall-oriented)
+ *     - scoringKeywords : tight set used by InboxRelevanceRanker (precision-oriented)
  *  4. Identify a date expression token so DateRangeResolver can convert it
  *  5. Identify a sender / company name when explicitly mentioned
+ *
+ * Key design decision — STATUS-SIGNAL WORDS ARE NOT SEARCH KEYWORDS:
+ *   Words like "apply", "application", "interview", "offer" appear in both
+ *   job-opportunity emails AND rejection/status/acknowledgement emails.
+ *   Including them as search keywords causes irrelevant emails to match the
+ *   DB query. They are intentionally excluded from searchKeywords and handled
+ *   instead by InboxRelevanceRanker's negative-signal detection.
  */
 @Component
 public class InboxQueryParser {
@@ -25,16 +34,17 @@ public class InboxQueryParser {
 
     public InboxQuery parse(String question) {
         if (question == null || question.isBlank()) {
-            return InboxQuery.general(question, List.of());
+            return InboxQuery.general(question, List.of(), List.of());
         }
         String lower = question.toLowerCase(Locale.ROOT);
 
-        Intent intent = detectIntent(lower);
-        String dateToken = extractDateToken(lower);
-        String sender   = extractSender(lower);
-        List<String> keywords = expandKeywords(lower, intent);
+        Intent intent          = detectIntent(lower);
+        String dateToken       = extractDateToken(lower);
+        String sender          = extractSender(lower);
+        List<String> searchKw  = buildSearchKeywords(lower, intent);
+        List<String> scoringKw = buildScoringKeywords(lower, intent);
 
-        return new InboxQuery(intent, keywords, dateToken, sender, question);
+        return new InboxQuery(intent, searchKw, scoringKw, dateToken, sender, question);
     }
 
     // ─── intent detection ─────────────────────────────────────────────────────
@@ -82,41 +92,79 @@ public class InboxQueryParser {
     // ─── date token extraction ────────────────────────────────────────────────
 
     /**
-     * Pulls the first recognisable date/time expression out of the question.
-     * The raw token is handed to {@link DateRangeResolver} for conversion.
+     * Pulls the first recognisable date/time expression from the question text.
+     *
+     * Priority tiers (highest first):
+     *   1. Explicit N-day windows       "last 3 days", "last 7 days", ...
+     *   2. Named relative windows       "this week", "last week", "this month", ...
+     *   3. Named calendar days          "yesterday", "today"
+     *   4. Recency shorthand            "latest", "recent", "recently", "newest"
+     *   5. Month + year                 "august 2026", "aug 2026"
+     *   6. Bare month name              "august", "july"
+     *   7. Bare 4-digit year            "2026"
      */
     private String extractDateToken(String text) {
-        // Ordered from most-specific to least-specific so we match the longest phrase first
-        String[] patterns = {
-            "last 3 days", "last 7 days", "last 30 days",
+
+        // Tier 1 — explicit N-day windows
+        String[] nDayPatterns = {
+            "last 30 days", "last 14 days", "last 7 days",
+            "last 5 days",  "last 3 days",  "last 2 days", "last 1 day"
+        };
+        for (String p : nDayPatterns) {
+            if (text.contains(p)) return p;
+        }
+        java.util.regex.Matcher nDayMatcher =
+            java.util.regex.Pattern.compile("last\\s+\\d+\\s+days?").matcher(text);
+        if (nDayMatcher.find()) return nDayMatcher.group();
+
+        // Tier 2 — named relative windows
+        String[] relativePatterns = {
             "this week", "last week",
             "this month", "last month",
-            "this year", "last year",
-            "yesterday", "today",
-            "latest", "recent", "recently", "newest",
-            "january","february","march","april","may","june",
-            "july","august","september","october","november","december"
+            "this year", "last year"
         };
-        for (String pattern : patterns) {
-            if (text.contains(pattern)) {
-                return pattern;
-            }
+        for (String p : relativePatterns) {
+            if (text.contains(p)) return p;
         }
-        // Year like "2025" or "2026"
+
+        // Tier 3 — named calendar days
+        if (text.contains("yesterday")) return "yesterday";
+        if (text.contains("today"))     return "today";
+
+        // Tier 4 — recency shorthand
+        if (text.contains("latest"))   return "latest";
+        if (text.contains("recent"))   return "recent";
+        if (text.contains("recently")) return "recently";
+        if (text.contains("newest"))   return "newest";
+
+        // Tier 5 — "month year"
+        java.util.regex.Matcher monthYearMatcher =
+            java.util.regex.Pattern.compile(
+                "(january|february|march|april|may|june|july|august|september|october|november|december"
+                + "|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
+                + "\\s+(\\d{4})"
+            ).matcher(text);
+        if (monthYearMatcher.find()) return monthYearMatcher.group();
+
+        // Tier 6 — bare month name
+        java.util.regex.Matcher monthOnlyMatcher =
+            java.util.regex.Pattern.compile(
+                "\\b(january|february|march|april|may|june|july|august"
+                + "|september|october|november|december"
+                + "|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\\b"
+            ).matcher(text);
+        if (monthOnlyMatcher.find()) return monthOnlyMatcher.group();
+
+        // Tier 7 — bare 4-digit year
         java.util.regex.Matcher yearMatcher =
-            java.util.regex.Pattern.compile("\\b(202[0-9])\\b").matcher(text);
-        if (yearMatcher.find()) {
-            return yearMatcher.group(1);
-        }
-        return null; // no date expression found — caller decides default
+            java.util.regex.Pattern.compile("\\b(20\\d{2})\\b").matcher(text);
+        if (yearMatcher.find()) return yearMatcher.group();
+
+        return null;
     }
 
     // ─── sender / company extraction ─────────────────────────────────────────
 
-    /**
-     * Looks for common sender-qualification phrases like "from Accenture" or
-     * "by Google" and returns the company/sender token.
-     */
     private String extractSender(String text) {
         java.util.regex.Matcher matcher =
             java.util.regex.Pattern.compile(
@@ -124,7 +172,6 @@ public class InboxQueryParser {
             ).matcher(text);
         if (matcher.find()) {
             String candidate = matcher.group(1).trim();
-            // reject generic words that aren't company names
             if (!containsAny(candidate, "me", "my", "the", "an", "a", "gmail", "inbox")) {
                 return candidate;
             }
@@ -132,44 +179,47 @@ public class InboxQueryParser {
         return null;
     }
 
-    // ─── keyword expansion ────────────────────────────────────────────────────
+    // ─── keyword building ─────────────────────────────────────────────────────
 
     /**
-     * Takes the raw question text and the detected intent, returns a de-duplicated
-     * ordered list of keywords to use in the DB keyword search.
+     * SEARCH keywords — broad set for the SQL ILIKE query.
+     * These are used for recall: we want to pull in as many potentially relevant
+     * emails as possible and let the ranker do precision filtering.
+     *
+     * EXCLUDED intentionally: "apply", "application", "interview", "offer" —
+     * these are status-signal words that match rejection/acknowledgement emails.
      */
-    private List<String> expandKeywords(String text, Intent intent) {
+    private List<String> buildSearchKeywords(String text, Intent intent) {
         Set<String> keywords = new LinkedHashSet<>();
 
-        // Always add explicit words from the question (tokens ≥ 3 chars, not stopwords)
+        // Add explicit non-stopword tokens from the question
         for (String token : text.split("[^a-z0-9.+#]+")) {
-            if (token.length() >= 3 && !STOPWORDS.contains(token)) {
+            if (token.length() >= 3 && !STOPWORDS.contains(token)
+                    && !STATUS_SIGNAL_WORDS.contains(token)) {
                 keywords.add(token);
             }
         }
 
-        // Add domain synonyms based on detected intent
         switch (intent) {
             case JOB_SEARCH -> {
-                keywords.addAll(JOB_CORE_TERMS);
-                // Role-specific expansions
+                keywords.addAll(JOB_SEARCH_TERMS);
                 if (containsAny(text, "full stack", "fullstack")) {
                     keywords.addAll(FULL_STACK_TERMS);
                 }
                 if (containsAny(text, "react")) {
-                    keywords.addAll(List.of("react", "reactjs", "react.js", "frontend", "javascript", "typescript"));
+                    keywords.addAll(List.of("react", "reactjs", "frontend", "javascript", "typescript"));
                 }
                 if (containsAny(text, "node", "node.js")) {
-                    keywords.addAll(List.of("node", "nodejs", "node.js", "backend", "express", "javascript"));
+                    keywords.addAll(List.of("node", "nodejs", "backend", "express", "javascript"));
                 }
                 if (containsAny(text, "java")) {
-                    keywords.addAll(List.of("java", "spring", "springboot", "backend", "jvm"));
+                    keywords.addAll(List.of("java", "spring", "springboot", "backend"));
                 }
                 if (containsAny(text, "python")) {
-                    keywords.addAll(List.of("python", "django", "flask", "fastapi", "data"));
+                    keywords.addAll(List.of("python", "django", "flask", "fastapi"));
                 }
-                if (containsAny(text, "data engineer", "data science", "ml", "machine learning", "ai")) {
-                    keywords.addAll(List.of("data engineer", "machine learning", "ml engineer", "ai", "data science", "analytics"));
+                if (containsAny(text, "data", "ml", "machine learning", "ai")) {
+                    keywords.addAll(List.of("data engineer", "machine learning", "ml", "data science"));
                 }
                 if (containsAny(text, "intern", "internship")) {
                     keywords.addAll(List.of("intern", "internship", "trainee", "graduate"));
@@ -179,11 +229,11 @@ public class InboxQueryParser {
                 }
             }
             case FINANCE ->
-                keywords.addAll(List.of("invoice", "receipt", "payment", "transaction", "billing", "subscription"));
+                keywords.addAll(List.of("invoice", "receipt", "payment", "transaction", "billing"));
             case NEWSLETTER ->
                 keywords.addAll(List.of("newsletter", "digest", "roundup", "weekly", "unsubscribe"));
             case NOTIFICATION ->
-                keywords.addAll(List.of("otp", "verification", "alert", "notification", "security", "confirm"));
+                keywords.addAll(List.of("verification", "alert", "notification", "security", "confirm"));
             case WORK ->
                 keywords.addAll(List.of("meeting", "project", "deadline", "client", "proposal"));
             case GENERAL -> { /* no expansion */ }
@@ -192,7 +242,73 @@ public class InboxQueryParser {
         return new ArrayList<>(keywords);
     }
 
+    /**
+     * SCORING keywords — tight set used by InboxRelevanceRanker for precision scoring.
+     * These are the core signals that a matching email should contain.
+     * Fewer, more specific terms — high-confidence relevance signals only.
+     */
+    private List<String> buildScoringKeywords(String text, Intent intent) {
+        Set<String> keywords = new LinkedHashSet<>();
+
+        switch (intent) {
+            case JOB_SEARCH -> {
+                // Core opportunity signals
+                keywords.addAll(List.of("hiring", "job opening", "job opportunity", "position",
+                        "vacancy", "career", "recruiter", "we are hiring", "opportunity"));
+                // Role keywords from the question
+                if (containsAny(text, "full stack", "fullstack")) {
+                    keywords.addAll(List.of("full stack", "full-stack", "fullstack",
+                            "software engineer", "software developer", "web developer", "mern"));
+                }
+                if (containsAny(text, "react")) {
+                    keywords.addAll(List.of("react", "frontend", "javascript"));
+                }
+                if (containsAny(text, "node", "node.js")) {
+                    keywords.addAll(List.of("node", "backend", "javascript"));
+                }
+                if (containsAny(text, "java")) {
+                    keywords.addAll(List.of("java developer", "java engineer", "spring"));
+                }
+                if (containsAny(text, "python")) {
+                    keywords.addAll(List.of("python developer", "python engineer"));
+                }
+                if (containsAny(text, "intern", "internship")) {
+                    keywords.addAll(List.of("intern", "internship", "graduate"));
+                }
+                if (containsAny(text, "devops")) {
+                    keywords.addAll(List.of("devops", "cloud engineer", "sre"));
+                }
+                // If no specific role, use generic developer/engineer terms
+                if (keywords.stream().noneMatch(k -> k.contains("engineer") || k.contains("developer"))) {
+                    keywords.addAll(List.of("developer", "engineer", "software"));
+                }
+            }
+            case FINANCE ->
+                keywords.addAll(List.of("invoice", "payment", "receipt", "transaction"));
+            case NEWSLETTER ->
+                keywords.addAll(List.of("newsletter", "digest", "weekly"));
+            case NOTIFICATION ->
+                keywords.addAll(List.of("alert", "verification", "notification"));
+            case WORK ->
+                keywords.addAll(List.of("meeting", "project", "deadline"));
+            case GENERAL -> { /* no scoring expansion — score on raw question tokens */ }
+        }
+
+        return new ArrayList<>(keywords);
+    }
+
     // ─── constants ────────────────────────────────────────────────────────────
+
+    /**
+     * Words excluded from search keywords because they appear in BOTH job opportunity
+     * emails AND application-status/rejection emails, causing false positives.
+     */
+    static final Set<String> STATUS_SIGNAL_WORDS = Set.of(
+        "apply", "applied", "application",
+        "interview", "interviewed",
+        "offer", "offered",
+        "status", "update", "regarding"
+    );
 
     private static final Set<String> STOPWORDS = Set.of(
         "the", "and", "for", "are", "was", "were", "has", "have", "had",
@@ -200,15 +316,17 @@ public class InboxQueryParser {
         "what", "when", "where", "who", "how", "why",
         "show", "find", "get", "give", "tell", "list",
         "can", "did", "does", "any", "all", "some",
-        "email", "emails", "mail", "inbox", "latest",
-        "recent", "today", "yesterday", "last", "week",
+        "email", "emails", "mail", "inbox",
+        "latest", "recent", "today", "yesterday", "last", "week",
         "month", "year", "days", "new", "old"
     );
 
-    private static final List<String> JOB_CORE_TERMS = List.of(
+    /**
+     * Broad search terms for SQL recall — no status-signal words.
+     */
+    private static final List<String> JOB_SEARCH_TERMS = List.of(
         "hiring", "recruitment", "job", "jobs", "opening", "position",
-        "vacancy", "career", "opportunity", "offer", "interview",
-        "apply", "application", "jd", "job description",
+        "vacancy", "career", "opportunity", "recruiter",
         "developer", "engineer", "software"
     );
 
@@ -217,7 +335,7 @@ public class InboxQueryParser {
         "software engineer", "software developer",
         "frontend", "backend", "web developer",
         "mern", "mean", "react", "node", "javascript", "typescript",
-        "sde", "swe", "engineering"
+        "sde", "swe"
     );
 
     // ─── helpers ──────────────────────────────────────────────────────────────
@@ -238,29 +356,28 @@ public class InboxQueryParser {
     /**
      * Structured representation of a parsed inbox search request.
      *
-     * @param intent    what the user is looking for
-     * @param keywords  expanded keyword list for DB search
-     * @param dateToken raw date expression extracted from the question (may be null)
-     * @param sender    company / sender filter extracted from question (may be null)
-     * @param raw       the original question text
+     * @param intent         what the user is looking for
+     * @param keywords       broad search keywords for SQL ILIKE (recall-oriented)
+     * @param scoringKeywords tight keywords for relevance scoring (precision-oriented)
+     * @param dateToken      raw date expression extracted from the question (may be null)
+     * @param sender         company / sender filter (may be null)
+     * @param raw            the original question text
      */
     public record InboxQuery(
         Intent intent,
         List<String> keywords,
+        List<String> scoringKeywords,
         String dateToken,
         String sender,
         String raw
     ) {
-        static InboxQuery general(String raw, List<String> keywords) {
-            return new InboxQuery(Intent.GENERAL, keywords, null, null, raw);
+        static InboxQuery general(String raw, List<String> keywords, List<String> scoringKeywords) {
+            return new InboxQuery(Intent.GENERAL, keywords, scoringKeywords, null, null, raw);
         }
 
-        /** True when the query has a date constraint that should filter results. */
-        public boolean hasDateFilter() { return dateToken != null; }
-
-        /** True when the query should restrict to a specific category. */
-        public boolean isJobSearch()   { return intent == Intent.JOB_SEARCH; }
-        public boolean isFinance()     { return intent == Intent.FINANCE; }
-        public boolean isNewsletter()  { return intent == Intent.NEWSLETTER; }
+        public boolean hasDateFilter()  { return dateToken != null; }
+        public boolean isJobSearch()    { return intent == Intent.JOB_SEARCH; }
+        public boolean isFinance()      { return intent == Intent.FINANCE; }
+        public boolean isNewsletter()   { return intent == Intent.NEWSLETTER; }
     }
 }

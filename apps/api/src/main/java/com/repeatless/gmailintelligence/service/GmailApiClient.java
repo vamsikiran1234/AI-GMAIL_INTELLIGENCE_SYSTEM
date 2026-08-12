@@ -26,14 +26,16 @@ public class GmailApiClient {
     private final WebClient googleOauthWebClient;
     private final AppProperties properties;
     private final RateLimitExecutor rateLimitExecutor;
+    private final EmailContentCleaner contentCleaner;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public GmailApiClient(WebClient gmailWebClient, WebClient googleOauthWebClient, AppProperties properties,
-            RateLimitExecutor rateLimitExecutor) {
+            RateLimitExecutor rateLimitExecutor, EmailContentCleaner contentCleaner) {
         this.gmailWebClient = gmailWebClient;
         this.googleOauthWebClient = googleOauthWebClient;
         this.properties = properties;
         this.rateLimitExecutor = rateLimitExecutor;
+        this.contentCleaner = contentCleaner;
     }
 
     public String buildAuthorizationUrl(String userId) {
@@ -311,8 +313,11 @@ public class GmailApiClient {
     private GmailMessageSnapshot parseMessage(JsonNode messageNode, String threadId) {
         JsonNode payload = messageNode.path("payload");
         JsonNode headers = payload.path("headers");
-        String bodyText = extractBodyText(payload);
-        String bodyHtml = extractBodyHtml(payload);
+        String rawBodyText = extractBodyText(payload);
+        String rawBodyHtml = extractBodyHtml(payload);
+        // Produce clean plain text at ingest time so all downstream consumers
+        // (AI evidence builder, citations, keyword search) receive readable text.
+        String cleanBodyText = contentCleaner.extractCleanText(rawBodyText, rawBodyHtml);
         return new GmailMessageSnapshot(
                 messageNode.path("id").asText(),
                 threadId,
@@ -324,8 +329,8 @@ public class GmailApiClient {
                 extractHeader(headers, "Cc"),
                 extractHeader(headers, "Subject"),
                 Instant.ofEpochMilli(messageNode.path("internalDate").asLong()),
-                bodyText,
-                bodyHtml,
+                cleanBodyText,
+                rawBodyHtml,   // preserve raw HTML separately for future use
                 messageNode.path("internalDate").asLong());
     }
 
