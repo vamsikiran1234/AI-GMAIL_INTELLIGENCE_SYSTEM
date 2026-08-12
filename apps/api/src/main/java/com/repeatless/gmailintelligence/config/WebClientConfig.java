@@ -43,7 +43,7 @@ public class WebClientConfig {
     WebClient nimWebClient(WebClient.Builder builder) {
         return builder
                 .clientConnector(new ReactorClientHttpConnector(
-                        HttpClient.create().responseTimeout(Duration.ofSeconds(60))))
+                        HttpClient.create().responseTimeout(Duration.ofSeconds(10))))
                 .baseUrl("https://integrate.api.nvidia.com")
                 .build();
     }
