@@ -11,7 +11,10 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 public class RateLimitExecutor {
 
     public <T> T execute(Callable<T> callable, String operationName) {
-        int maxAttempts = 5;
+        return execute(callable, operationName, 5);
+    }
+
+    public <T> T execute(Callable<T> callable, String operationName, int maxAttempts) {
         long delayMillis = 500L;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -19,7 +22,14 @@ public class RateLimitExecutor {
                 return callable.call();
             } catch (WebClientResponseException exception) {
                 if (!isRetryable(exception.getStatusCode()) || attempt == maxAttempts) {
-                    throw new IllegalStateException(operationName + " failed: " + exception.getStatusText(), exception);
+                    String responseBody = exception.getResponseBodyAsString();
+                    String message = operationName + " failed: " + exception.getStatusText();
+                    if (responseBody != null && !responseBody.isBlank()) {
+                        message += " - " + responseBody;
+                    }
+                    // Preserve the HTTP status code in the exception type so callers
+                    // (e.g. fetchThreadOrFallback) can distinguish 404 from real errors.
+                    throw new GmailApiException(message, exception, exception.getStatusCode().value());
                 }
                 sleep(delayMillis);
                 delayMillis = Math.min(delayMillis * 2, 8_000L);

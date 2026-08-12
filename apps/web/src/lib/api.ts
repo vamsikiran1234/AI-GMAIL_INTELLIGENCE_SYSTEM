@@ -28,16 +28,23 @@ export type ThreadMessagesResponse = { threadId: string; messages: MessageItem[]
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8081/api';
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
-  });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed with status ${response.status}`);
+async function request<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      signal: controller.signal,
+      ...init,
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `Request failed with status ${response.status}`);
+    }
+    return response.json() as Promise<T>;
+  } finally {
+    clearTimeout(timer);
   }
-  return response.json() as Promise<T>;
 }
 
 // ─── API functions ────────────────────────────────────────────────────────────
@@ -46,14 +53,14 @@ export const fetchHealth = (): Promise<HealthResponse> => request('/health');
 export const startOauth = (userId: string): Promise<OAuthStartResponse> =>
   request(`/oauth/google/start?userId=${encodeURIComponent(userId)}`);
 export const runSync = (userId: string): Promise<SyncStatusResponse> =>
-  request('/sync', { method: 'POST', body: JSON.stringify({ userId }) });
+  request('/sync', { method: 'POST', body: JSON.stringify({ userId }) }, 120_000);
 export const fetchThreads = (userId: string, page = 0, pageSize = 20): Promise<ThreadListResponse> =>
   request(`/threads?userId=${encodeURIComponent(userId)}&page=${page}&pageSize=${pageSize}`);
 export const fetchThreadMessages = (userId: string, threadId: string): Promise<ThreadMessagesResponse> =>
   request(`/threads/${encodeURIComponent(threadId)}/messages?userId=${encodeURIComponent(userId)}`);
 export const askAssistant = (userId: string, message: string, conversationId?: string): Promise<ChatResponse> =>
-  request('/assistant/chat', { method: 'POST', body: JSON.stringify({ userId, message, conversationId: conversationId ?? '' }) });
+  request('/assistant/chat', { method: 'POST', body: JSON.stringify({ userId, message, conversationId: conversationId ?? '' }) }, 60_000);
 export const createDraft = (userId: string, prompt: string, mode: 'compose' | 'reply', threadId = ''): Promise<DraftResponse> =>
-  request('/assistant/draft', { method: 'POST', body: JSON.stringify({ userId, prompt, mode, threadId }) });
+  request('/assistant/draft', { method: 'POST', body: JSON.stringify({ userId, prompt, mode, threadId }) }, 60_000);
 export const sendDraft = (userId: string, draftId: string): Promise<SendResponse> =>
   request('/threads/send', { method: 'POST', body: JSON.stringify({ userId, draftId }) });
